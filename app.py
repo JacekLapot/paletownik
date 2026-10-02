@@ -19,10 +19,23 @@ FIELDS = [
     "Kompletność", "Cena nowego", "Cena używanego", "Realna cena sprzedaży",
     "Cena wystawienia", "Źródło ceny", "Link do oferty", "Uwagi", "Priorytet"
 ]
-PRIORITIES = [
-    "Najważniejsze do sprzedaży", "Ważne", "Mogą poczekać", "Drobnica / badziew"
-]
-OLD_PRIORITY_MAP = {"Wysoki":"Najważniejsze do sprzedaży", "Normalny":"Ważne", "Niski":"Mogą poczekać"}
+PRIORITIES = ["Poziom 1", "Poziom 2", "Poziom 3", "Poziom 4"]
+OLD_PRIORITY_MAP = {
+    "Wysoki":"Poziom 1", "Normalny":"Poziom 2", "Niski":"Poziom 3",
+    "Najważniejsze do sprzedaży":"Poziom 1", "Ważne":"Poziom 2",
+    "Mogą poczekać":"Poziom 3", "Drobnica / badziew":"Poziom 4"
+}
+
+def priority_from_price(price):
+    """Poziom wartości liczony wyłącznie od realnej ceny sprzedaży za sztukę."""
+    price = float(price or 0)
+    if price >= 250:
+        return "Poziom 1"
+    if price >= 150:
+        return "Poziom 2"
+    if price >= 50:
+        return "Poziom 3"
+    return "Poziom 4"
 
 SCHEMA = {
     "type":"object", "additionalProperties":False,
@@ -44,7 +57,7 @@ Jesteś asystentem do wyceny produktów z palet zwrotów konsumenckich w Polsce.
 Przeanalizuj zdjęcie produktu. Zidentyfikuj markę, produkt i model możliwie dokładnie. Jeśli modelu nie da się potwierdzić, wpisz pusty string zamiast zgadywać.
 Użyj wyszukiwania internetowego i sprawdź AKTUALNE ceny w Polsce. Priorytet źródeł: Allegro, OLX, Ceneo, polskie sklepy, oficjalny producent. Szukaj przede wszystkim dokładnego modelu. Jeśli go nie ma, użyj porównywalnych ofert i zaznacz to w uwagach.
 Zasady: cena nowego = realna aktualna cena, nie MSRP; cena używanego = typowa cena kompletnego sprawnego egzemplarza; realna cena sprzedaży = konserwatywna kwota możliwa do uzyskania w Polsce; cena wystawienia = trochę wyższa; nie zawyżaj pojedynczą drogą ofertą; przy dużej konkurencji obniż wycenę; nie zakładaj kompletności ze zdjęcia; stan ze zdjęcia oznacz jako Nowy / do sprawdzenia lub Nieznany / do sprawdzenia; link ma być prawdziwy, jeśli znaleziony.
-Priorytet: Najważniejsze do sprzedaży = wartościowy i łatwy do sprzedaży; Ważne = sensowny produkt o dobrej wartości/popycie; Mogą poczekać = mniej atrakcyjny lub wymagający czasu; Drobnica / badziew = tani, no-name, mało atrakcyjny lub trudny do sprzedaży.
+Poziom wartości: wyznacz go WYŁĄCZNIE na podstawie realnej ceny sprzedaży za sztukę: >=250 zł = Poziom 1; >=150 zł i <250 zł = Poziom 2; >=50 zł i <150 zł = Poziom 3; <50 zł = Poziom 4. Nie wybieraj poziomu na podstawie atrakcyjności produktu, marki ani łatwości sprzedaży.
 Zwróć wyłącznie JSON zgodny ze schematem.
 """
 
@@ -132,9 +145,9 @@ def load_products(conn, pallet_id):
     df = db_query(conn, sql, {"pallet_id": int(pallet_id)})
     rows = df.to_dict("records")
     for r in rows:
-        r["Priorytet"] = OLD_PRIORITY_MAP.get(r.get("Priorytet"), r.get("Priorytet", "Ważne"))
         for k in ["Cena nowego","Cena używanego","Realna cena sprzedaży","Cena wystawienia"]:
             r[k] = float(r[k] or 0)
+        r["Priorytet"] = priority_from_price(r["Realna cena sprzedaży"])
         r["Ilość"] = int(r["Ilość"] or 1)
         r["Lp."] = int(r["Lp."])
         r["_db_id"] = int(r["id"])
@@ -163,7 +176,7 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         "completeness": data["kompletnosc"], "new_price": data["cena_nowego"], "used_price": data["cena_uzywanego"],
         "real_sale_price": data["realna_cena_sprzedazy"], "listing_price": data["cena_wystawienia"],
         "price_source": data["zrodlo_ceny"], "offer_link": data["link_do_oferty"],
-        "notes": data["uwagi"] + f" | Pewność identyfikacji: {data['pewnosc_ident']}", "priority": data["priorytet"],
+        "notes": data["uwagi"] + f" | Pewność identyfikacji: {data['pewnosc_ident']}", "priority": priority_from_price(data["realna_cena_sprzedazy"]),
         "image_thumb": image_thumb or ""
     }
     with conn.session as s:
@@ -179,7 +192,8 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
     return int(result.scalar_one())
 
 
-def update_product(conn, product_id, quantity, real_price, listing_price, priority, offer_link=None):
+def update_product(conn, product_id, quantity, real_price, listing_price, priority=None, offer_link=None):
+    priority = priority_from_price(real_price)
     with conn.session as s:
         if offer_link is None:
             s.execute(text("""UPDATE products SET quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p, updated_at=NOW() WHERE id=:id"""),
@@ -394,7 +408,8 @@ if st.session_state.last_added:
 st.divider(); st.subheader("📋 Zawartość palety")
 if products:
     df=pd.DataFrame(products); df["Wartość pozycji"]=df["Ilość"].astype(float)*df["Realna cena sprzedaży"].astype(float)
-    display_cols=["Miniatura","Lp.","Ilość","Kategoria","Marka","Produkt","Model","Realna cena sprzedaży","Wartość pozycji","Cena wystawienia","Priorytet","Link do oferty"]
+    df["Poziom"] = df["Priorytet"]
+    display_cols=["Miniatura","Lp.","Ilość","Kategoria","Marka","Produkt","Model","Realna cena sprzedaży","Wartość pozycji","Cena wystawienia","Poziom","Link do oferty"]
     st.dataframe(
         df[display_cols],
         use_container_width=True,
@@ -404,6 +419,7 @@ if products:
             "Link do oferty": st.column_config.LinkColumn("Przykładowa oferta", display_text="Otwórz")
         }
     )
+    st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę. 1: ≥250 zł • 2: 150–249,99 zł • 3: 50–149,99 zł • 4: <50 zł.")
     st.caption("Miniatury są zapisywane w bazie razem z produktem, więc są widoczne także na telefonie i innych urządzeniach.")
     with st.expander("🖼️ Zdjęcia produktów", expanded=False):
         st.caption("Jeśli produkt nie ma zdjęcia, kliknij ➕ przy jego nazwie i dodaj fotografię. Zdjęcie zapisze się od razu w bazie.")
@@ -446,10 +462,10 @@ if products:
     with e2: new_real=st.number_input("Realna sprzedaż / szt.",min_value=0.0,value=float(row['Realna cena sprzedaży']),step=5.0,key=f"edit_real_{row['_db_id']}")
     with e3: new_listing=st.number_input("Cena wystawienia",min_value=0.0,value=float(row['Cena wystawienia']),step=5.0,key=f"edit_listing_{row['_db_id']}")
     with e4:
-        cp=OLD_PRIORITY_MAP.get(row.get('Priorytet'),row.get('Priorytet','Ważne')); cp=cp if cp in PRIORITIES else 'Ważne'
-        priority=st.selectbox("Priorytet",PRIORITIES,index=PRIORITIES.index(cp),key=f"edit_priority_{row['_db_id']}")
+        st.metric("Poziom", priority_from_price(new_real))
     new_offer=st.text_input("Link do przykładowej oferty",value=str(row.get("Link do oferty","") or ""),key=f"edit_offer_{row['_db_id']}")
-    if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,priority,new_offer); st.rerun()
+    st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: ≥250 zł = 1 • 150–249,99 zł = 2 • 50–149,99 zł = 3 • <50 zł = 4.")
+    if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer); st.rerun()
     if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
 
