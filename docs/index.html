@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="application-name" content="Paletownia">
+  <meta name="apple-mobile-web-app-title" content="Paletownia">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <title>Paletownia</title>
+  <style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#fff}
+    #app{width:100%;height:100%;border:0;display:block}
+    #msg{font:16px system-ui,sans-serif;padding:24px;line-height:1.5}
+    code{background:#f1f5f9;padding:2px 5px;border-radius:4px}
+  </style>
+</head>
+<body>
+  <div id="msg">Ładowanie Paletownii…</div>
+  <script src="config.js"></script>
+  <script>
+    const msg = document.getElementById('msg');
+    if (!APP_URL || APP_URL.includes('TWOJA-APLIKACJA')) {
+      msg.innerHTML = 'Uzupełnij adres aplikacji Streamlit w pliku <code>docs/config.js</code>.';
+    } else {
+      const iframe = document.createElement('iframe');
+      iframe.id = 'app';
+      iframe.src = APP_URL + (APP_URL.includes('?') ? '&' : '?') + 'embed=true';
+      iframe.allow = 'camera; microphone; geolocation; fullscreen';
+      iframe.allowFullscreen = true;
+      iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+      msg.replaceWith(iframe);
+    }
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+    }
+  </script>
+</body>
+</html>
