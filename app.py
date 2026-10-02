@@ -148,7 +148,7 @@ def load_products(conn, pallet_id):
            product AS \"Produkt\", model AS \"Model\", state AS \"Stan\", completeness AS \"Kompletność\",
            new_price AS \"Cena nowego\", used_price AS \"Cena używanego\", real_sale_price AS \"Realna cena sprzedaży\",
            listing_price AS \"Cena wystawienia\", price_source AS \"Źródło ceny\", offer_link AS \"Link do oferty\",
-           notes AS \"Uwagi\", priority AS \"Priorytet\", image_thumb AS \"Miniatura\"
+           notes AS \"Uwagi\", priority AS \"Priorytet\", image_thumb AS \"Miniatura\", created_at AS \"Data dodania\"
     FROM products WHERE pallet_id = :pallet_id ORDER BY position, id
     """
     df = db_query(conn, sql, {"pallet_id": int(pallet_id)})
@@ -418,6 +418,47 @@ if st.session_state.last_added:
             st.markdown(f"[Przykładowa oferta]({added['link']})")
 
 st.divider(); st.subheader("📋 Zawartość palety")
+
+sort_choice_mobile = st.selectbox(
+    "Sortowanie",
+    [
+        "Data dodania — najnowsze",
+        "Data dodania — najstarsze",
+        "Nazwa A–Z",
+        "Nazwa Z–A",
+        "Wartość — od najwyższej",
+        "Wartość — od najniższej",
+    ],
+    key="sort_choice_mobile",
+)
+
+def _product_name_for_sort(r):
+    return " ".join(
+        str(x).strip()
+        for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")]
+        if str(x).strip()
+    ).lower()
+
+def _product_value_for_sort(r):
+    return float(r.get("Ilość", 1) or 1) * float(r.get("Realna cena sprzedaży", 0) or 0)
+
+def _product_date_for_sort(r):
+    # load_products returns created_at when available; fallback keeps stable order.
+    return str(r.get("created_at", r.get("Data dodania", "")) or "")
+
+if products:
+    if sort_choice_mobile == "Nazwa A–Z":
+        products = sorted(products, key=_product_name_for_sort)
+    elif sort_choice_mobile == "Nazwa Z–A":
+        products = sorted(products, key=_product_name_for_sort, reverse=True)
+    elif sort_choice_mobile == "Wartość — od najwyższej":
+        products = sorted(products, key=_product_value_for_sort, reverse=True)
+    elif sort_choice_mobile == "Wartość — od najniższej":
+        products = sorted(products, key=_product_value_for_sort)
+    elif sort_choice_mobile == "Data dodania — najstarsze":
+        products = sorted(products, key=_product_date_for_sort)
+    else:
+        products = sorted(products, key=_product_date_for_sort, reverse=True)
 if products:
     # Mobile-first card view: much easier to scan on a phone than a wide dataframe.
     st.markdown("""
