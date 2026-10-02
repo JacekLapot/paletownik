@@ -23,6 +23,19 @@ FIELDS = [
     "Link do oferty", "Uwagi", "Priorytet"
 ]
 
+PRIORITIES = [
+    "Najważniejsze do sprzedaży",
+    "Ważne",
+    "Mogą poczekać",
+    "Drobnica / badziew",
+]
+
+OLD_PRIORITY_MAP = {
+    "Wysoki": "Najważniejsze do sprzedaży",
+    "Normalny": "Ważne",
+    "Niski": "Mogą poczekać",
+}
+
 SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -42,7 +55,12 @@ SCHEMA = {
         "uwagi": {"type": "string"},
         "priorytet": {
             "type": "string",
-            "enum": ["Wysoki", "Normalny", "Niski"]
+            "enum": [
+                "Najważniejsze do sprzedaży",
+                "Ważne",
+                "Mogą poczekać",
+                "Drobnica / badziew"
+            ]
         },
         "pewnosc_ident": {
             "type": "string",
@@ -85,6 +103,13 @@ Zasady wyceny:
   jest dostępny. Jeśli nie ma dokładnego linku, zostaw pusty.
 - W uwagach wyjaśnij niepewności i czy cena opiera się na dokładnym modelu
   czy na porównywalnych ofertach.
+- Ustal priorytet sprzedaży według tych zasad:
+  * "Najważniejsze do sprzedaży" = wartościowy, łatwy do sprzedania produkt,
+    który warto wystawić w pierwszej kolejności.
+  * "Ważne" = sensowny produkt o dobrej wartości lub popycie, ale nie tak pilny.
+  * "Mogą poczekać" = produkt mniej atrakcyjny sprzedażowo lub wymagający więcej czasu.
+  * "Drobnica / badziew" = tani, mało atrakcyjny, no-name, trudny do sprzedaży
+    albo o bardzo niskiej wartości.
 - Zwróć wyłącznie JSON zgodny ze schematem.
 """
 
@@ -301,6 +326,8 @@ def start_new_pallet():
 def load_history_pallet(index):
     entry = st.session_state.pallet_history[index]
     st.session_state.products = [dict(row) for row in entry["products"]]
+    for row in st.session_state.products:
+        row["Priorytet"] = OLD_PRIORITY_MAP.get(row.get("Priorytet"), row.get("Priorytet", "Ważne"))
     st.session_state.pending = None
     st.session_state.last_analyzed_hash = None
     st.session_state.current_pallet_name = entry["name"]
@@ -350,6 +377,10 @@ with st.sidebar:
 
         if st.button("📂 Wczytaj wybraną paletę", use_container_width=True):
             load_history_pallet(history_index)
+            st.rerun()
+
+        if st.button("🗑️ Usuń wybraną paletę", use_container_width=True):
+            st.session_state.pallet_history.pop(history_index)
             st.rerun()
 
         entry = st.session_state.pallet_history[history_index]
@@ -578,10 +609,13 @@ if st.session_state.products:
             key=f"edit_listing_{idx}"
         )
     with e4:
+        current_priority = OLD_PRIORITY_MAP.get(row.get("Priorytet"), row.get("Priorytet", "Ważne"))
+        if current_priority not in PRIORITIES:
+            current_priority = "Ważne"
         priority = st.selectbox(
             "Priorytet",
-            ["Wysoki", "Normalny", "Niski"],
-            index=["Wysoki", "Normalny", "Niski"].index(row["Priorytet"]),
+            PRIORITIES,
+            index=PRIORITIES.index(current_priority),
             key=f"edit_priority_{idx}"
         )
 
