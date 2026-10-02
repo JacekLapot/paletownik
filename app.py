@@ -201,15 +201,18 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
     return int(result.scalar_one())
 
 
-def update_product(conn, product_id, quantity, real_price, listing_price, priority=None, offer_link=None):
+def update_product(conn, product_id, quantity, real_price, listing_price, priority=None, offer_link=None, product_name=None):
     priority = priority_from_price(real_price)
     with conn.session as s:
-        if offer_link is None:
-            s.execute(text("""UPDATE products SET quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p, updated_at=NOW() WHERE id=:id"""),
-                      {"q":int(quantity),"r":float(real_price),"l":float(listing_price),"p":priority,"id":int(product_id)})
-        else:
-            s.execute(text("""UPDATE products SET quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p, offer_link=:o, updated_at=NOW() WHERE id=:id"""),
-                      {"q":int(quantity),"r":float(real_price),"l":float(listing_price),"p":priority,"o":str(offer_link or "").strip(),"id":int(product_id)})
+        params={"q":int(quantity),"r":float(real_price),"l":float(listing_price),"p":priority,"id":int(product_id)}
+        sets="quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p"
+        if offer_link is not None:
+            sets += ", offer_link=:o"
+            params["o"] = str(offer_link or "").strip()
+        if product_name is not None:
+            sets += ", product=:product"
+            params["product"] = str(product_name or "").strip()
+        s.execute(text(f"UPDATE products SET {sets}, updated_at=NOW() WHERE id=:id"), params)
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {"id":int(product_id)})
         s.commit()
 
@@ -466,6 +469,7 @@ if products:
     st.markdown("### 🛠️ Ręczna edycja")
     options=[f"{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}" for r in products]
     selected_product=st.selectbox("Wybierz produkt",options); idx=options.index(selected_product); row=products[idx]
+    new_product_name=st.text_input("Nazwa produktu",value=str(row.get("Produkt","") or ""),key=f"edit_product_{row['_db_id']}")
     e1,e2,e3,e4=st.columns(4)
     with e1: new_qty=st.number_input("Ilość",min_value=1,value=int(row['Ilość']),step=1,key=f"edit_qty_{row['_db_id']}")
     with e2: new_real=st.number_input("Realna sprzedaż / szt.",min_value=0.0,value=float(row['Realna cena sprzedaży']),step=5.0,key=f"edit_real_{row['_db_id']}")
@@ -474,7 +478,7 @@ if products:
         st.metric("Poziom", priority_from_price(new_real))
     new_offer=st.text_input("Link do przykładowej oferty",value=str(row.get("Link do oferty","") or ""),key=f"edit_offer_{row['_db_id']}")
     st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
-    if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer); st.rerun()
+    if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer,new_product_name); st.rerun()
     if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
 
