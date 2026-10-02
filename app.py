@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import hashlib
 from datetime import datetime
 
 import pandas as pd
@@ -230,6 +231,8 @@ def make_excel(cost):
     summary = wb.create_sheet("Podsumowanie")
     summary["A1"] = "PODSUMOWANIE PALETY"
     summary["A1"].font = Font(bold=True, size=16)
+    summary["A2"] = "Nazwa palety"
+    summary["B2"] = st.session_state.current_pallet_name
     summary["A3"] = "Liczba pozycji"
     summary["B3"] = len(st.session_state.products)
     summary["A4"] = "Liczba sztuk"
@@ -256,16 +259,103 @@ if "pending" not in st.session_state:
     st.session_state.pending = None
 if "camera_enabled" not in st.session_state:
     st.session_state.camera_enabled = True
+if "last_analyzed_hash" not in st.session_state:
+    st.session_state.last_analyzed_hash = None
+if "pallet_history" not in st.session_state:
+    st.session_state.pallet_history = []
+if "current_pallet_name" not in st.session_state:
+    st.session_state.current_pallet_name = "Nowa paleta"
+if "current_pallet_cost" not in st.session_state:
+    st.session_state.current_pallet_cost = 360.0
+if "pallet_id" not in st.session_state:
+    st.session_state.pallet_id = 0
+
+
+def save_current_pallet():
+    if not st.session_state.products:
+        return False
+
+    # Zapisujemy kopię danych, żeby późniejsza edycja bieżącej palety
+    # nie zmieniała historycznego zapisu.
+    snapshot = [dict(row) for row in st.session_state.products]
+    entry = {
+        "name": st.session_state.current_pallet_name.strip() or "Bez nazwy",
+        "cost": float(st.session_state.current_pallet_cost),
+        "products": snapshot,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    st.session_state.pallet_history.insert(0, entry)
+    return True
+
+
+def start_new_pallet():
+    save_current_pallet()
+    st.session_state.products = []
+    st.session_state.pending = None
+    st.session_state.last_analyzed_hash = None
+    st.session_state.current_pallet_name = "Nowa paleta"
+    st.session_state.current_pallet_cost = 360.0
+    st.session_state.pallet_id += 1
+
+
+def load_history_pallet(index):
+    entry = st.session_state.pallet_history[index]
+    st.session_state.products = [dict(row) for row in entry["products"]]
+    st.session_state.pending = None
+    st.session_state.last_analyzed_hash = None
+    st.session_state.current_pallet_name = entry["name"]
+    st.session_state.current_pallet_cost = float(entry["cost"])
+    st.session_state.pallet_id += 1
+
 
 # ---------- Sidebar ----------
 with st.sidebar:
-    st.header("⚙️ Ustawienia")
+    st.header("⚙️ Palety")
+
+    st.text_input(
+        "Nazwa bieżącej palety",
+        key="current_pallet_name",
+        placeholder="np. Paleta 01 - elektronika"
+    )
+
     pallet_cost = st.number_input(
         "Koszt palety (zł)",
         min_value=0.0,
-        value=360.0,
-        step=10.0
+        step=10.0,
+        key="current_pallet_cost"
     )
+
+    if st.button("🆕 Nowa paleta", use_container_width=True, type="primary"):
+        start_new_pallet()
+        st.rerun()
+
+    st.divider()
+    st.subheader("📚 Historia palet")
+
+    if st.session_state.pallet_history:
+        history_labels = [
+            f"{i + 1}. {entry['name']} — {entry['created_at']}"
+            for i, entry in enumerate(st.session_state.pallet_history)
+        ]
+        selected_history = st.selectbox(
+            "Wybierz zapisaną paletę",
+            history_labels,
+            key="history_selector"
+        )
+        history_index = history_labels.index(selected_history)
+
+        if st.button("📂 Wczytaj wybraną paletę", use_container_width=True):
+            load_history_pallet(history_index)
+            st.rerun()
+
+        entry = st.session_state.pallet_history[history_index]
+        st.caption(
+            f"{len(entry['products'])} pozycji • "
+            f"{sum(int(r['Ilość']) for r in entry['products'])} szt. • "
+            f"wartość {sum(float(r['Ilość']) * float(r['Realna cena sprzedaży']) for r in entry['products']):.0f} zł"
+        )
+    else:
+        st.info("Brak zapisanych palet.")
 
     st.divider()
     st.write("**Status API:**")
@@ -274,13 +364,9 @@ with st.sidebar:
     else:
         st.error("Brak OPENAI_API_KEY")
 
-    if st.button("🆕 Nowa paleta", use_container_width=True):
-        st.session_state.products = []
-        st.session_state.pending = None
-        st.rerun()
-
 # ---------- Header ----------
 st.title("📦 Paletownik AI")
+st.subheader(f"🗂️ {st.session_state.current_pallet_name}")
 st.caption("Zdjęcie → rozpoznanie → ceny → duplikaty → wartość palety")
 
 total = total_value()
@@ -302,7 +388,7 @@ with c1:
     st.subheader("📸 Zrób zdjęcie")
     camera = st.camera_input(
         "Aparat",
-        key="camera",
+        key=f"camera_{st.session_state.pallet_id}",
         resolution="720p"
     )
 
@@ -311,29 +397,33 @@ with c2:
     upload = st.file_uploader(
         "Zdjęcie produktu",
         type=["jpg", "jpeg", "png", "webp"],
-        key="uploader"
+        key=f"uploader_{st.session_state.pallet_id}"
     )
 
 image_file = camera if camera is not None else upload
 
 if image_file is not None:
+    image_bytes = image_file.getvalue()
+    image_hash = hashlib.sha256(image_bytes).hexdigest()
     st.image(image_file, caption="Wybrane zdjęcie", width="stretch")
 
-    if st.button(
-        "🤖 ROZPOZNAJ PRODUKT I WYCENIAJ",
-        type="primary",
-        use_container_width=True
-    ):
-        with st.spinner("AI rozpoznaje produkt i sprawdza aktualne ceny..."):
+    # Automatyczna analiza: nowe zdjęcie uruchamia AI bez klikania przycisku.
+    # Hash zapobiega ponownemu wywołaniu API przy każdym rerunie Streamlit.
+    if image_hash != st.session_state.last_analyzed_hash:
+        st.session_state.last_analyzed_hash = image_hash
+        with st.spinner("🤖 AI rozpoznaje produkt i sprawdza aktualne ceny..."):
             try:
                 result = analyze_image(
-                    image_file.getvalue(),
+                    image_bytes,
                     getattr(image_file, "type", "image/jpeg")
                 )
                 st.session_state.pending = result
                 st.rerun()
             except Exception as exc:
+                st.session_state.last_analyzed_hash = None
                 st.error(f"Nie udało się przeanalizować zdjęcia: {exc}")
+    elif st.session_state.pending is None:
+        st.info("Zdjęcie jest gotowe. AI analizuje je automatycznie po wybraniu nowego zdjęcia.")
 
 # ---------- Pending result ----------
 if st.session_state.pending:
@@ -511,7 +601,8 @@ if st.session_state.products:
     st.subheader("📥 Eksport")
 
     excel_bytes = make_excel(pallet_cost)
-    filename = f"paleta_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    safe_name = re.sub(r"[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ _-]+", "", st.session_state.current_pallet_name).strip().replace(" ", "_") or "paleta"
+    filename = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
 
     st.download_button(
         "📊 Pobierz Excel",
