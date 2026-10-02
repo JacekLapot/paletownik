@@ -312,18 +312,22 @@ def load_history_pallet(index):
 with st.sidebar:
     st.header("⚙️ Palety")
 
-    st.text_input(
+    # Nie używamy klucza widgetu jako zmiennej stanu palety.
+    # Dzięki temu funkcja „Nowa paleta” może bezpiecznie zmienić nazwę/koszt.
+    pallet_name_input = st.text_input(
         "Nazwa bieżącej palety",
-        key="current_pallet_name",
+        value=st.session_state.current_pallet_name,
         placeholder="np. Paleta 01 - elektronika"
     )
+    st.session_state.current_pallet_name = pallet_name_input
 
     pallet_cost = st.number_input(
         "Koszt palety (zł)",
         min_value=0.0,
-        step=10.0,
-        key="current_pallet_cost"
+        value=float(st.session_state.current_pallet_cost),
+        step=10.0
     )
+    st.session_state.current_pallet_cost = float(pallet_cost)
 
     if st.button("🆕 Nowa paleta", use_container_width=True, type="primary"):
         start_new_pallet()
