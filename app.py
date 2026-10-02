@@ -126,7 +126,7 @@ def load_products(conn, pallet_id):
            product AS \"Produkt\", model AS \"Model\", state AS \"Stan\", completeness AS \"Kompletność\",
            new_price AS \"Cena nowego\", used_price AS \"Cena używanego\", real_sale_price AS \"Realna cena sprzedaży\",
            listing_price AS \"Cena wystawienia\", price_source AS \"Źródło ceny\", offer_link AS \"Link do oferty\",
-           notes AS \"Uwagi\", priority AS \"Priorytet\"
+           notes AS \"Uwagi\", priority AS \"Priorytet\", image_thumb AS \"Miniatura\"
     FROM products WHERE pallet_id = :pallet_id ORDER BY position, id
     """
     df = db_query(conn, sql, {"pallet_id": int(pallet_id)})
