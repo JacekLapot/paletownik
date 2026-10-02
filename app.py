@@ -19,23 +19,32 @@ FIELDS = [
     "Kompletność", "Cena nowego", "Cena używanego", "Realna cena sprzedaży",
     "Cena wystawienia", "Źródło ceny", "Link do oferty", "Uwagi", "Priorytet"
 ]
-PRIORITIES = ["Poziom 1", "Poziom 2", "Poziom 3", "Poziom 4"]
+PRIORITIES = ["🟡 Priorytet", "🟢 Ważne", "🟠 Mogą poczekać", "🔴 Badziew"]
+
+LEVELS = {
+    1: "🟡 Priorytet",
+    2: "🟢 Ważne",
+    3: "🟠 Mogą poczekać",
+    4: "🔴 Badziew",
+}
+
+def level_label(price):
+    price = float(price or 0)
+    if price >= 250: return LEVELS[1]
+    if price >= 150: return LEVELS[2]
+    if price >= 50: return LEVELS[3]
+    return LEVELS[4]
 OLD_PRIORITY_MAP = {
-    "Wysoki":"Poziom 1", "Normalny":"Poziom 2", "Niski":"Poziom 3",
-    "Najważniejsze do sprzedaży":"Poziom 1", "Ważne":"Poziom 2",
-    "Mogą poczekać":"Poziom 3", "Drobnica / badziew":"Poziom 4"
+    "Wysoki":"🟡 Priorytet", "Normalny":"🟢 Ważne", "Niski":"🟠 Mogą poczekać",
+    "Najważniejsze do sprzedaży":"🟡 Priorytet", "Ważne":"🟢 Ważne",
+    "Mogą poczekać":"🟠 Mogą poczekać", "Drobnica / badziew":"🔴 Badziew",
+    "Poziom 1":"🟡 Priorytet", "Poziom 2":"🟢 Ważne", "Poziom 3":"🟠 Mogą poczekać", "Poziom 4":"🔴 Badziew"
 }
 
 def priority_from_price(price):
-    """Poziom wartości liczony wyłącznie od realnej ceny sprzedaży za sztukę."""
-    price = float(price or 0)
-    if price >= 250:
-        return "Poziom 1"
-    if price >= 150:
-        return "Poziom 2"
-    if price >= 50:
-        return "Poziom 3"
-    return "Poziom 4"
+    """Automatyczne oznaczenie na podstawie realnej ceny sprzedaży za sztukę."""
+    return level_label(price)
+
 
 SCHEMA = {
     "type":"object", "additionalProperties":False,
@@ -419,7 +428,7 @@ if products:
             "Link do oferty": st.column_config.LinkColumn("Przykładowa oferta", display_text="Otwórz")
         }
     )
-    st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę. 1: ≥250 zł • 2: 150–249,99 zł • 3: 50–149,99 zł • 4: <50 zł.")
+    st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę. 🟡 Priorytet: ≥250 zł • 🟢 Ważne: 150–249,99 zł • 🟠 Mogą poczekać: 50–149,99 zł • 🔴 Badziew: <50 zł.")
     st.caption("Miniatury są zapisywane w bazie razem z produktem, więc są widoczne także na telefonie i innych urządzeniach.")
     with st.expander("🖼️ Zdjęcia produktów", expanded=False):
         st.caption("Jeśli produkt nie ma zdjęcia, kliknij ➕ przy jego nazwie i dodaj fotografię. Zdjęcie zapisze się od razu w bazie.")
@@ -464,7 +473,7 @@ if products:
     with e4:
         st.metric("Poziom", priority_from_price(new_real))
     new_offer=st.text_input("Link do przykładowej oferty",value=str(row.get("Link do oferty","") or ""),key=f"edit_offer_{row['_db_id']}")
-    st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: ≥250 zł = 1 • 150–249,99 zł = 2 • 50–149,99 zł = 3 • <50 zł = 4.")
+    st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
     if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer); st.rerun()
     if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
