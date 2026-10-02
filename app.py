@@ -419,35 +419,51 @@ if st.session_state.last_added:
 
 st.divider(); st.subheader("📋 Zawartość palety")
 if products:
-    df=pd.DataFrame(products); df["Wartość pozycji"]=df["Ilość"].astype(float)*df["Realna cena sprzedaży"].astype(float)
-    df["Poziom"] = df["Priorytet"]
-    display_cols=["Miniatura","Lp.","Ilość","Kategoria","Marka","Produkt","Model","Realna cena sprzedaży","Wartość pozycji","Cena wystawienia","Poziom","Link do oferty"]
-    st.dataframe(
-        df[display_cols],
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Miniatura": st.column_config.ImageColumn("Zdjęcie", width="small"),
-            "Link do oferty": st.column_config.LinkColumn("Przykładowa oferta", display_text="Otwórz")
-        }
-    )
-    st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę. 🟡 Priorytet: ≥250 zł • 🟢 Ważne: 150–249,99 zł • 🟠 Mogą poczekać: 50–149,99 zł • 🔴 Badziew: <50 zł.")
-    st.caption("Miniatury są zapisywane w bazie razem z produktem, więc są widoczne także na telefonie i innych urządzeniach.")
-    with st.expander("🖼️ Zdjęcia produktów", expanded=False):
-        st.caption("Jeśli produkt nie ma zdjęcia, kliknij ➕ przy jego nazwie i dodaj fotografię. Zdjęcie zapisze się od razu w bazie.")
-        for r in products:
-            photo_col, name_col, info_col = st.columns([0.7, 4.8, 2.5])
+    # Mobile-first card view: much easier to scan on a phone than a wide dataframe.
+    st.markdown("""
+    <style>
+    .product-card { border:1px solid #e5e7eb; border-radius:16px; padding:12px; margin:8px 0; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.05); }
+    .product-name { font-size:1.02rem; font-weight:700; line-height:1.25; margin-bottom:5px; }
+    .product-meta { color:#6b7280; font-size:.86rem; line-height:1.35; }
+    .product-price { font-size:1.18rem; font-weight:800; margin-top:5px; }
+    .level-badge { display:inline-block; padding:4px 9px; border-radius:999px; font-size:.78rem; font-weight:700; margin:2px 0 4px; }
+    .lvl1 { background:#fff1bf; color:#6b5200; }
+    .lvl2 { background:#dcfce7; color:#166534; }
+    .lvl3 { background:#ffedd5; color:#9a3412; }
+    .lvl4 { background:#fee2e2; color:#991b1b; }
+    @media (max-width: 640px) {
+      .product-card { padding:10px; border-radius:14px; }
+      .product-name { font-size:.98rem; }
+      .product-price { font-size:1.1rem; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    def level_css(label):
+        if "Priorytet" in label: return "lvl1"
+        if "Ważne" in label: return "lvl2"
+        if "Mogą poczekać" in label: return "lvl3"
+        return "lvl4"
+
+    for r in products:
+        level = level_label(float(r["Realna cena sprzedaży"]))
+        cls = level_css(level)
+        name = " ".join(str(x).strip() for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")] if str(x).strip())
+        thumb = str(r.get("Miniatura") or "")
+
+        with st.container(border=True):
+            photo_col, details_col = st.columns([1.05, 2.6], vertical_alignment="center")
             with photo_col:
-                thumb = str(r.get("Miniatura") or "")
                 if thumb:
-                    st.image(thumb, width=58)
+                    st.image(thumb, width="stretch")
                 else:
+                    st.markdown('<div style="height:120px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:32px;">📷</div>', unsafe_allow_html=True)
                     with st.popover("➕", help="Dodaj zdjęcie do tego produktu"):
-                        st.write(f"**Dodaj zdjęcie:** {r['Marka']} {r['Produkt']}")
+                        st.write(f"**Dodaj zdjęcie:** {name}")
                         photo = st.file_uploader(
                             "Wybierz zdjęcie",
                             type=["jpg", "jpeg", "png", "webp"],
-                            key=f"add_photo_{r['_db_id']}",
+                            key=f"card_add_photo_{r['_db_id']}",
                             label_visibility="collapsed"
                         )
                         if photo is not None:
@@ -457,10 +473,58 @@ if products:
                                     update_product_thumbnail(conn, r["_db_id"], new_thumb)
                                     st.success("Zdjęcie dodane.")
                                     st.rerun()
-                                else:
-                                    st.error("Nie udało się przetworzyć zdjęcia.")
                             except Exception as exc:
                                 st.error(f"Nie udało się zapisać zdjęcia: {exc}")
+            with details_col:
+                st.markdown(f'<div class="product-name">{int(r["Lp."])}. {name}</div>', unsafe_allow_html=True)
+                st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
+                st.markdown(f'<div class="product-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="product-meta">Ilość: <b>{int(r["Ilość"])}</b> · Wartość pozycji: <b>{float(r["Ilość"])*float(r["Realna cena sprzedaży"]):.0f} zł</b></div>', unsafe_allow_html=True)
+                if str(r.get("Link do oferty") or "").strip():
+                    try:
+                        st.link_button("🔗 Zobacz ofertę", str(r["Link do oferty"]), use_container_width=True)
+                    except Exception:
+                        st.markdown(f'[🔗 Zobacz ofertę]({r["Link do oferty"]})')
+
+            with st.expander("🛠️ Edycja produktu", expanded=False):
+                new_product_name = st.text_input(
+                    "Nazwa produktu",
+                    value=str(r.get("Produkt", "") or ""),
+                    key=f"card_edit_product_{r['_db_id']}"
+                )
+                e1, e2 = st.columns(2)
+                with e1:
+                    new_qty = st.number_input("Ilość", min_value=1, value=int(r["Ilość"]), step=1, key=f"card_edit_qty_{r['_db_id']}")
+                with e2:
+                    new_real = st.number_input("Realna sprzedaż / szt.", min_value=0.0, value=float(r["Realna cena sprzedaży"]), step=5.0, key=f"card_edit_real_{r['_db_id']}")
+                e3, e4 = st.columns(2)
+                with e3:
+                    new_listing = st.number_input("Cena wystawienia", min_value=0.0, value=float(r["Cena wystawienia"]), step=5.0, key=f"card_edit_listing_{r['_db_id']}")
+                with e4:
+                    st.metric("Poziom", level_label(new_real))
+                new_offer = st.text_input("Link do przykładowej oferty", value=str(r.get("Link do oferty", "") or ""), key=f"card_edit_offer_{r['_db_id']}")
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("💾 Zapisz zmiany", key=f"card_save_{r['_db_id']}", use_container_width=True):
+                        update_product(conn, r["_db_id"], new_qty, new_real, new_listing, None, new_offer, new_product_name)
+                        st.rerun()
+                with b2:
+                    if st.button("🗑️ Usuń produkt", key=f"card_delete_{r['_db_id']}", use_container_width=True):
+                        delete_product(conn, r["_db_id"])
+                        st.rerun()
+
+    st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
+
+    with st.expander("🖼️ Zdjęcia produktów", expanded=False):
+        st.caption("Miniatury są zapisane w bazie. Produkty bez zdjęcia możesz uzupełnić przyciskiem ➕ na karcie produktu.")
+        for r in products:
+            photo_col, name_col, info_col = st.columns([0.7, 4.8, 2.5])
+            with photo_col:
+                thumb = str(r.get("Miniatura") or "")
+                if thumb:
+                    st.image(thumb, width=58)
+                else:
+                    st.caption("brak")
             with name_col:
                 st.markdown(f"**{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}**")
             with info_col:
@@ -474,8 +538,7 @@ if products:
         with e1: new_qty=st.number_input("Ilość",min_value=1,value=int(row['Ilość']),step=1,key=f"edit_qty_{row['_db_id']}")
         with e2: new_real=st.number_input("Realna sprzedaż / szt.",min_value=0.0,value=float(row['Realna cena sprzedaży']),step=5.0,key=f"edit_real_{row['_db_id']}")
         with e3: new_listing=st.number_input("Cena wystawienia",min_value=0.0,value=float(row['Cena wystawienia']),step=5.0,key=f"edit_listing_{row['_db_id']}")
-        with e4:
-            st.metric("Poziom", priority_from_price(new_real))
+        with e4: st.metric("Poziom", level_label(new_real))
         new_offer=st.text_input("Link do przykładowej oferty",value=str(row.get("Link do oferty","") or ""),key=f"edit_offer_{row['_db_id']}")
         st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
         if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer,new_product_name); st.rerun()
