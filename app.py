@@ -12,7 +12,23 @@ from openai import OpenAI
 from sqlalchemy import text
 from PIL import Image
 
-st.set_page_config(page_title="Paletownik AI", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Paletownia", page_icon="📦", layout="wide")
+
+# Paletownia PWA metadata
+st.markdown(
+    """
+    <link rel="manifest" href="app/static/manifest.json">
+    <meta name="application-name" content="Paletownia">
+    <meta name="apple-mobile-web-app-title" content="Paletownia">
+    <meta name="theme-color" content="#2563eb">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <link rel="apple-touch-icon" href="app/static/icon-192.png">
+    """,
+    unsafe_allow_html=True,
+)
+
 
 FIELDS = [
     "Lp.", "Ilość", "Kategoria", "Marka", "Produkt", "Model", "Stan",
