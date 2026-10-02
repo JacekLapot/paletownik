@@ -10,6 +10,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openai import OpenAI
 from sqlalchemy import text
+from PIL import Image
 
 st.set_page_config(page_title="Paletownik AI", page_icon="📦", layout="wide")
 
@@ -75,8 +76,10 @@ CREATE TABLE IF NOT EXISTS products (
     notes TEXT NOT NULL DEFAULT '',
     priority TEXT NOT NULL DEFAULT 'Ważne',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    image_thumb TEXT NOT NULL DEFAULT ''
 );
+ALTER TABLE products ADD COLUMN IF NOT EXISTS image_thumb TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_products_pallet_id ON products(pallet_id);
 """
 
@@ -139,7 +142,20 @@ def load_products(conn, pallet_id):
     return rows
 
 
-def save_product(conn, pallet_id, data, quantity=1):
+def make_thumbnail_data_url(image_bytes, max_size=220):
+    """Tworzy małą miniaturę JPEG do przechowywania w PostgreSQL."""
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=78, optimize=True)
+        b64 = __import__("base64").b64encode(out.getvalue()).decode("ascii")
+        return "data:image/jpeg;base64," + b64
+    except Exception:
+        return ""
+
+
+def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
     row = {
         "position": len(load_products(conn, pallet_id)) + 1,
         "quantity": int(quantity), "category": data["kategoria"], "brand": data["marka"],
@@ -147,14 +163,15 @@ def save_product(conn, pallet_id, data, quantity=1):
         "completeness": data["kompletnosc"], "new_price": data["cena_nowego"], "used_price": data["cena_uzywanego"],
         "real_sale_price": data["realna_cena_sprzedazy"], "listing_price": data["cena_wystawienia"],
         "price_source": data["zrodlo_ceny"], "offer_link": data["link_do_oferty"],
-        "notes": data["uwagi"] + f" | Pewność identyfikacji: {data['pewnosc_ident']}", "priority": data["priorytet"]
+        "notes": data["uwagi"] + f" | Pewność identyfikacji: {data['pewnosc_ident']}", "priority": data["priorytet"],
+        "image_thumb": image_thumb or ""
     }
     with conn.session as s:
         result = s.execute(text("""
             INSERT INTO products (pallet_id, position, quantity, category, brand, product, model, state, completeness,
-                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority)
+                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority, image_thumb)
             VALUES (:pallet_id,:position,:quantity,:category,:brand,:product,:model,:state,:completeness,
-                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,:notes,:priority)
+                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,:notes,:priority,:image_thumb)
             RETURNING id
         """), {"pallet_id":int(pallet_id), **row})
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=:id"), {"id":int(pallet_id)})
@@ -162,11 +179,24 @@ def save_product(conn, pallet_id, data, quantity=1):
     return int(result.scalar_one())
 
 
-def update_product(conn, product_id, quantity, real_price, listing_price, priority):
+def update_product(conn, product_id, quantity, real_price, listing_price, priority, offer_link=None):
     with conn.session as s:
-        s.execute(text("""UPDATE products SET quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p, updated_at=NOW() WHERE id=:id"""),
-                  {"q":int(quantity),"r":float(real_price),"l":float(listing_price),"p":priority,"id":int(product_id)})
+        if offer_link is None:
+            s.execute(text("""UPDATE products SET quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p, updated_at=NOW() WHERE id=:id"""),
+                      {"q":int(quantity),"r":float(real_price),"l":float(listing_price),"p":priority,"id":int(product_id)})
+        else:
+            s.execute(text("""UPDATE products SET quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p, offer_link=:o, updated_at=NOW() WHERE id=:id"""),
+                      {"q":int(quantity),"r":float(real_price),"l":float(listing_price),"p":priority,"o":str(offer_link or "").strip(),"id":int(product_id)})
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {"id":int(product_id)})
+        s.commit()
+
+
+def update_product_thumbnail(conn, product_id, image_thumb):
+    if not image_thumb:
+        return
+    with conn.session as s:
+        s.execute(text("UPDATE products SET image_thumb=:img, updated_at=NOW() WHERE id=:id AND COALESCE(image_thumb, '')=''"),
+                  {"img": image_thumb, "id": int(product_id)})
         s.commit()
 
 
@@ -257,6 +287,7 @@ def make_excel(products, pallet_name, cost):
 if "current_pallet_id" not in st.session_state: st.session_state.current_pallet_id=None
 if "pending" not in st.session_state: st.session_state.pending=None
 if "last_analyzed_hash" not in st.session_state: st.session_state.last_analyzed_hash=None
+if "last_added" not in st.session_state: st.session_state.last_added=None
 
 conn=db_conn()
 if conn:
@@ -285,13 +316,13 @@ with st.sidebar:
     if st.button("💾 Zapisz nazwę i koszt", use_container_width=True):
         update_pallet(conn, st.session_state.current_pallet_id, name, cost); st.rerun()
     if st.button("🆕 Nowa paleta", use_container_width=True, type="primary"):
-        pid=create_pallet(conn, "Nowa paleta", 360); st.session_state.current_pallet_id=pid; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.rerun()
+        pid=create_pallet(conn, "Nowa paleta", 360); st.session_state.current_pallet_id=pid; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.session_state.last_added=None; st.rerun()
     st.divider(); st.subheader("📚 Historia palet")
     labels=[f"{int(r.id)} — {r['name']} — {str(r['updated_at'])[:16]}" for _,r in pallets.iterrows()]
     selected=st.selectbox("Wybierz paletę", labels, index=max(0,next((i for i,r in pallets.iterrows() if int(r.id)==st.session_state.current_pallet_id),0)), key="pallet_selector")
     selected_id=int(selected.split(" — ",1)[0])
     if selected_id != st.session_state.current_pallet_id:
-        st.session_state.current_pallet_id=selected_id; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.rerun()
+        st.session_state.current_pallet_id=selected_id; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.session_state.last_added=None; st.rerun()
     hist_row=pallets[pallets["id"]==selected_id].iloc[0]
     hist_products=load_products(conn, selected_id)
     st.caption(f"{len(hist_products)} pozycji • {sum(int(r['Ilość']) for r in hist_products)} szt. • wartość {total_value(hist_products):.0f} zł")
@@ -324,43 +355,56 @@ if image_file is not None:
     if h != st.session_state.last_analyzed_hash:
         st.session_state.last_analyzed_hash=h
         with st.spinner("🤖 AI rozpoznaje produkt i sprawdza aktualne ceny..."):
-            try: st.session_state.pending=analyze_image(b,getattr(image_file,"type","image/jpeg")); st.rerun()
-            except Exception as exc: st.session_state.last_analyzed_hash=None; st.error(f"Nie udało się przeanalizować zdjęcia: {exc}")
+            try:
+                data=analyze_image(b,getattr(image_file,"type","image/jpeg"))
+                # Automatyczne dodanie do palety bez akceptacji.
+                products_now=load_products(conn, int(st.session_state.current_pallet_id))
+                thumb = make_thumbnail_data_url(b)
+                duplicate_idx=find_duplicate(products_now,data)
+                if duplicate_idx is not None:
+                    existing=products_now[duplicate_idx]
+                    new_qty=int(existing["Ilość"])+1
+                    update_product(conn, existing["_db_id"], new_qty, existing["Realna cena sprzedaży"], existing["Cena wystawienia"], existing["Priorytet"])
+                    if not existing.get("Miniatura"):
+                        update_product_thumbnail(conn, existing["_db_id"], thumb)
+                    st.session_state.last_added={
+                        "kind":"duplicate", "name":f"{existing['Marka']} {existing['Produkt']} {existing['Model']}",
+                        "quantity":new_qty, "price":float(existing["Realna cena sprzedaży"])
+                    }
+                else:
+                    save_product(conn, int(st.session_state.current_pallet_id), data, 1, thumb)
+                    st.session_state.last_added={
+                        "kind":"new", "name":f"{data['marka']} {data['produkt']} {data['model']}".strip(),
+                        "quantity":1, "price":float(data["realna_cena_sprzedazy"]), "link":data.get("link_do_oferty", "")
+                    }
+                st.rerun()
+            except Exception as exc:
+                st.session_state.last_analyzed_hash=None
+                st.error(f"Nie udało się przeanalizować zdjęcia: {exc}")
 
-if st.session_state.pending:
-    data=st.session_state.pending; st.divider(); st.subheader("🔎 Wynik AI")
-    p1,p2=st.columns([2,1])
-    with p1:
-        st.write(f"**{data['marka']} {data['produkt']}**" + (f" — **{data['model']}**" if data['model'] else ""))
-        st.write(f"Kategoria: **{data['kategoria']}**"); st.write(f"Stan: **{data['stan']}**"); st.write(f"Kompletność: **{data['kompletnosc']}**"); st.write(f"Pewność identyfikacji: **{data['pewnosc_ident']}**")
-        if data['uwagi']: st.info(data['uwagi'])
-        if data['link_do_oferty']: st.markdown(f"[Przykładowa oferta]({data['link_do_oferty']})")
-    with p2:
-        st.metric("Cena nowego",f"{data['cena_nowego']:.0f} zł"); st.metric("Cena używanego",f"{data['cena_uzywanego']:.0f} zł"); st.metric("Realna sprzedaż / szt.",f"{data['realna_cena_sprzedazy']:.0f} zł"); st.metric("Cena wystawienia",f"{data['cena_wystawienia']:.0f} zł")
-    duplicate_idx=find_duplicate(products,data)
-    if duplicate_idx is not None:
-        existing=products[duplicate_idx]; st.warning(f"⚠️ Ten produkt już istnieje: {existing['Marka']} {existing['Produkt']} {existing['Model']} — {existing['Ilość']} szt.")
-        d1,d2=st.columns(2)
-        with d1: add_qty=st.number_input("Dodaj sztuk",min_value=1,value=1,step=1,key="duplicate_add_qty")
-        with d2:
-            if st.button("➕ Dodaj",type="primary",use_container_width=True):
-                update_product(conn, existing['_db_id'], int(existing['Ilość'])+int(add_qty), existing['Realna cena sprzedaży'], existing['Cena wystawienia'], existing['Priorytet']); st.session_state.pending=None; st.rerun()
-        if st.button("➕ Dodaj jako osobną pozycję",use_container_width=True):
-            save_product(conn,st.session_state.current_pallet_id,data,int(add_qty)); st.session_state.pending=None; st.rerun()
+if st.session_state.last_added:
+    added=st.session_state.last_added
+    if added.get("kind")=="duplicate":
+        st.success(f"✅ Produkt rozpoznany jako duplikat i automatycznie dodany jako kolejna sztuka: **{added['name']}**. Łącznie: **{added['quantity']} szt.**")
     else:
-        qty=st.number_input("Ilość sztuk",min_value=1,value=1,step=1,key="new_product_qty")
-        st.caption(f"Wartość pozycji: **{int(qty)*data['realna_cena_sprzedazy']:.0f} zł**")
-        a1,a2=st.columns(2)
-        with a1:
-            if st.button("✅ Dodaj do palety",type="primary",use_container_width=True): save_product(conn,st.session_state.current_pallet_id,data,int(qty)); st.session_state.pending=None; st.rerun()
-        with a2:
-            if st.button("❌ Odrzuć wynik AI",use_container_width=True): st.session_state.pending=None; st.rerun()
+        st.success(f"✅ Produkt automatycznie dodany do palety: **{added['name']}** — realna sprzedaż: **{added['price']:.0f} zł**")
+        if added.get("link"):
+            st.markdown(f"[Przykładowa oferta]({added['link']})")
 
 st.divider(); st.subheader("📋 Zawartość palety")
 if products:
     df=pd.DataFrame(products); df["Wartość pozycji"]=df["Ilość"].astype(float)*df["Realna cena sprzedaży"].astype(float)
-    display_cols=["Lp.","Ilość","Kategoria","Marka","Produkt","Model","Realna cena sprzedaży","Wartość pozycji","Cena wystawienia","Priorytet"]
-    st.dataframe(df[display_cols],use_container_width=True,hide_index=True)
+    display_cols=["Miniatura","Lp.","Ilość","Kategoria","Marka","Produkt","Model","Realna cena sprzedaży","Wartość pozycji","Cena wystawienia","Priorytet","Link do oferty"]
+    st.dataframe(
+        df[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Miniatura": st.column_config.ImageColumn("Zdjęcie", width="small"),
+            "Link do oferty": st.column_config.LinkColumn("Przykładowa oferta", display_text="Otwórz")
+        }
+    )
+    st.caption("Miniatury są zapisywane w bazie razem z produktem, więc są widoczne także na telefonie i innych urządzeniach.")
     st.markdown("### 🛠️ Ręczna edycja")
     options=[f"{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}" for r in products]
     selected_product=st.selectbox("Wybierz produkt",options); idx=options.index(selected_product); row=products[idx]
@@ -371,7 +415,8 @@ if products:
     with e4:
         cp=OLD_PRIORITY_MAP.get(row.get('Priorytet'),row.get('Priorytet','Ważne')); cp=cp if cp in PRIORITIES else 'Ważne'
         priority=st.selectbox("Priorytet",PRIORITIES,index=PRIORITIES.index(cp),key=f"edit_priority_{row['_db_id']}")
-    if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,priority); st.rerun()
+    new_offer=st.text_input("Link do przykładowej oferty",value=str(row.get("Link do oferty","") or ""),key=f"edit_offer_{row['_db_id']}")
+    if st.button("💾 Zapisz zmiany",use_container_width=True): update_product(conn,row['_db_id'],new_qty,new_real,new_listing,priority,new_offer); st.rerun()
     if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
 
