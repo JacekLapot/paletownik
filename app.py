@@ -405,38 +405,38 @@ if products:
         }
     )
     st.caption("Miniatury są zapisywane w bazie razem z produktem, więc są widoczne także na telefonie i innych urządzeniach.")
-    st.markdown("### 🖼️ Zdjęcia produktów")
-    st.caption("Jeśli produkt nie ma zdjęcia, kliknij ➕ przy jego nazwie i dodaj fotografię. Zdjęcie zapisze się od razu w bazie.")
-    for r in products:
-        photo_col, name_col, info_col = st.columns([0.7, 4.8, 2.5])
-        with photo_col:
-            thumb = str(r.get("Miniatura") or "")
-            if thumb:
-                st.image(thumb, width=58)
-            else:
-                with st.popover("➕", help="Dodaj zdjęcie do tego produktu"):
-                    st.write(f"**Dodaj zdjęcie:** {r['Marka']} {r['Produkt']}")
-                    photo = st.file_uploader(
-                        "Wybierz zdjęcie",
-                        type=["jpg", "jpeg", "png", "webp"],
-                        key=f"add_photo_{r['_db_id']}",
-                        label_visibility="collapsed"
-                    )
-                    if photo is not None:
-                        try:
-                            new_thumb = make_thumbnail_data_url(photo.getvalue())
-                            if new_thumb:
-                                update_product_thumbnail(conn, r["_db_id"], new_thumb)
-                                st.success("Zdjęcie dodane.")
-                                st.rerun()
-                            else:
-                                st.error("Nie udało się przetworzyć zdjęcia.")
-                        except Exception as exc:
-                            st.error(f"Nie udało się zapisać zdjęcia: {exc}")
-        with name_col:
-            st.markdown(f"**{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}**")
-        with info_col:
-            st.caption(f"Realna sprzedaż: {float(r['Realna cena sprzedaży']):.0f} zł • Ilość: {int(r['Ilość'])}")
+    with st.expander("🖼️ Zdjęcia produktów", expanded=False):
+        st.caption("Jeśli produkt nie ma zdjęcia, kliknij ➕ przy jego nazwie i dodaj fotografię. Zdjęcie zapisze się od razu w bazie.")
+        for r in products:
+            photo_col, name_col, info_col = st.columns([0.7, 4.8, 2.5])
+            with photo_col:
+                thumb = str(r.get("Miniatura") or "")
+                if thumb:
+                    st.image(thumb, width=58)
+                else:
+                    with st.popover("➕", help="Dodaj zdjęcie do tego produktu"):
+                        st.write(f"**Dodaj zdjęcie:** {r['Marka']} {r['Produkt']}")
+                        photo = st.file_uploader(
+                            "Wybierz zdjęcie",
+                            type=["jpg", "jpeg", "png", "webp"],
+                            key=f"add_photo_{r['_db_id']}",
+                            label_visibility="collapsed"
+                        )
+                        if photo is not None:
+                            try:
+                                new_thumb = make_thumbnail_data_url(photo.getvalue())
+                                if new_thumb:
+                                    update_product_thumbnail(conn, r["_db_id"], new_thumb)
+                                    st.success("Zdjęcie dodane.")
+                                    st.rerun()
+                                else:
+                                    st.error("Nie udało się przetworzyć zdjęcia.")
+                            except Exception as exc:
+                                st.error(f"Nie udało się zapisać zdjęcia: {exc}")
+            with name_col:
+                st.markdown(f"**{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}**")
+            with info_col:
+                st.caption(f"Realna sprzedaż: {float(r['Realna cena sprzedaży']):.0f} zł • Ilość: {int(r['Ilość'])}")
 
     st.markdown("### 🛠️ Ręczna edycja")
     options=[f"{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}" for r in products]
