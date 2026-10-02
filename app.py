@@ -300,7 +300,10 @@ with st.sidebar:
             delete_pallet(conn, selected_id); st.session_state.current_pallet_id=int(pallets[pallets['id']!=selected_id].iloc[0]['id']); st.session_state.pending=None; st.rerun()
         else: st.warning("Nie można usunąć jedynej palety.")
     st.divider(); st.write("**Status API:**")
-    st.success("OPENAI_API_KEY ustawiony") if get_client() else st.error("Brak OPENAI_API_KEY")
+    if get_client():
+        st.success("OPENAI_API_KEY ustawiony")
+    else:
+        st.error("Brak OPENAI_API_KEY")
 
 st.title("📦 Paletownik AI")
 st.subheader(f"🗂️ {current['name']}")
