@@ -746,7 +746,14 @@ st.divider()
 c1,c2=st.columns(2)
 with c1:
     st.subheader("📸 Zrób zdjęcie")
-    camera=st.camera_input("Aparat", key=f"camera_{st.session_state.current_pallet_id}", resolution="720p")
+    # Po każdym przetworzonym zdjęciu zwiększamy numer klucza. Dzięki temu
+    # kamera jest od razu gotowa na kolejne zdjęcie — bez ręcznego „Clear photo”.
+    camera_key_version = int(st.session_state.get("camera_key_version", 0))
+    camera=st.camera_input(
+        "Aparat",
+        key=f"camera_{st.session_state.current_pallet_id}_{camera_key_version}",
+        resolution="720p"
+    )
 with c2:
     st.subheader("📁 Wybierz z urządzenia")
     upload=st.file_uploader("Zdjęcie produktu", type=["jpg","jpeg","png","webp"], key=f"uploader_{st.session_state.current_pallet_id}")
@@ -778,6 +785,9 @@ if image_file is not None:
                         "kind":"new", "name":f"{data['marka']} {data['produkt']} {data['model']}".strip(),
                         "quantity":1, "price":float(data["realna_cena_sprzedazy"]), "link":data.get("link_do_oferty", "")
                     }
+                # Zresetuj widget kamery przed kolejnym przebiegiem aplikacji.
+                # Użytkownik od razu dostaje ponownie możliwość zrobienia zdjęcia.
+                st.session_state.camera_key_version = int(st.session_state.get("camera_key_version", 0)) + 1
                 st.rerun()
             except Exception as exc:
                 st.session_state.last_analyzed_hash=None
