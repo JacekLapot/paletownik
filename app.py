@@ -382,32 +382,33 @@ def _secret_value(name, default=""):
 
 
 def send_product_inquiry(product, customer_name, customer_email, customer_phone="", customer_message=""):
-    """Wysyła zapytanie klienta przez oficjalne Resend API."""
-    import resend
+    """Wysyła zapytanie klienta przez Gmail SMTP z użyciem hasła aplikacji Google."""
+    import smtplib
+    from email.message import EmailMessage
 
-    api_key = _secret_value("RESEND_API_KEY")
+    smtp_username = _secret_value("SMTP_USERNAME", "jacek.lapot@gmail.com")
+    smtp_password = _secret_value("SMTP_PASSWORD")
     recipient = _secret_value("CONTACT_EMAIL", "alfa.alwaysfair@gmail.com")
-    sender = _secret_value("RESEND_FROM", "onboarding@resend.dev")
+    smtp_host = _secret_value("SMTP_HOST", "smtp.gmail.com")
+    smtp_port = int(_secret_value("SMTP_PORT", "587"))
 
-    if not api_key:
+    if not smtp_password:
         raise RuntimeError(
-            "Brak RESEND_API_KEY w Streamlit Secrets. "
-            "Dodaj go jako sekret główny: RESEND_API_KEY = \"re_...\" i zapisz ustawienia. "
-            "Po zmianie Secrets zrestartuj aplikację."
+            "Brak SMTP_PASSWORD w Streamlit Secrets. Dodaj 16-znakowe hasło aplikacji Google "
+            "dla konta jacek.lapot@gmail.com."
         )
-
-    if not recipient:
-        raise RuntimeError("Brak CONTACT_EMAIL w Streamlit Secrets.")
-    if not sender:
-        raise RuntimeError("Brak RESEND_FROM w Streamlit Secrets.")
 
     product_name = public_product_name(product)
     price = float(product.get("real_sale_price", 0) or 0)
     phone_line = customer_phone.strip() if customer_phone else "Nie podano"
     message_text = customer_message.strip() or "Nie podano"
 
-    subject = f"Zapytanie o produkt — {product_name}"
-    body = (
+    msg = EmailMessage()
+    msg["Subject"] = f"Zapytanie o produkt — {product_name}"
+    msg["From"] = smtp_username
+    msg["To"] = recipient
+    msg["Reply-To"] = customer_email.strip()
+    msg.set_content(
         "Nowe zapytanie z Paletownii\n\n"
         f"Produkt: {product_name}\n"
         f"Cena: {price:.2f} zł\n"
@@ -418,26 +419,22 @@ def send_product_inquiry(product, customer_name, customer_email, customer_phone=
         "Wiadomość została wysłana z publicznego katalogu Paletownii."
     )
 
-    resend.api_key = api_key
-    params = {
-        "from": sender,
-        "to": [recipient],
-        "reply_to": customer_email.strip(),
-        "subject": subject,
-        "text": body,
-    }
-
     try:
-        result = resend.Emails.send(params)
-        # SDK może zwrócić obiekt z polem error albo rzucić wyjątek.
-        error = getattr(result, "error", None)
-        if error:
-            raise RuntimeError(f"Resend: {error}")
-        return result
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(smtp_username, smtp_password)
+            server.send_message(msg)
+    except smtplib.SMTPAuthenticationError as exc:
+        raise RuntimeError(
+            "Gmail odrzucił logowanie. Sprawdź SMTP_USERNAME oraz czy SMTP_PASSWORD "
+            "jest 16-znakowym hasłem aplikacji Google."
+        ) from exc
     except Exception as exc:
-        if isinstance(exc, RuntimeError):
-            raise
-        raise RuntimeError(f"Resend: {exc}") from exc
+        raise RuntimeError(f"Gmail SMTP: {exc}") from exc
+
+    return True
 
 
 def render_inquiry_form(product):
