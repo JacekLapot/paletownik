@@ -182,13 +182,16 @@ def load_products(conn, pallet_id):
     return rows
 
 
-def make_thumbnail_data_url(image_bytes, max_size=220):
-    """Tworzy małą miniaturę JPEG do przechowywania w PostgreSQL."""
+def make_thumbnail_data_url(image_bytes, max_size=1000):
+    """Tworzy wysokiej jakości podgląd JPEG do przechowywania w PostgreSQL.
+    Obraz jest ograniczany do 1000 px na dłuższym boku, dzięki czemu
+    pozostaje wyraźny w katalogu i na telefonie, ale nie robi się niepotrzebnie ciężki.
+    """
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
         out = io.BytesIO()
-        img.save(out, format="JPEG", quality=78, optimize=True)
+        img.save(out, format="JPEG", quality=90, optimize=True, progressive=True)
         b64 = __import__("base64").b64encode(out.getvalue()).decode("ascii")
         return "data:image/jpeg;base64," + b64
     except Exception:
@@ -235,12 +238,16 @@ def update_product(conn, product_id, quantity, real_price, listing_price, priori
         s.commit()
 
 
-def update_product_thumbnail(conn, product_id, image_thumb):
+def update_product_thumbnail(conn, product_id, image_thumb, replace=False):
     if not image_thumb:
         return
     with conn.session as s:
-        s.execute(text("UPDATE products SET image_thumb=:img, updated_at=NOW() WHERE id=:id AND COALESCE(image_thumb, '')=''"),
-                  {"img": image_thumb, "id": int(product_id)})
+        if replace:
+            s.execute(text("UPDATE products SET image_thumb=:img, updated_at=NOW() WHERE id=:id"),
+                      {"img": image_thumb, "id": int(product_id)})
+        else:
+            s.execute(text("UPDATE products SET image_thumb=:img, updated_at=NOW() WHERE id=:id AND COALESCE(image_thumb, '')=''"),
+                      {"img": image_thumb, "id": int(product_id)})
         s.commit()
 
 
@@ -792,6 +799,23 @@ if products:
             with photo_col:
                 if thumb:
                     st.image(thumb, width="stretch")
+                    with st.popover("🖼️ Zmień zdjęcie", help="Zmień zdjęcie przypisane do tej oferty"):
+                        st.write(f"**Zmień zdjęcie:** {name}")
+                        photo = st.file_uploader(
+                            "Wybierz nowe zdjęcie",
+                            type=["jpg", "jpeg", "png", "webp"],
+                            key=f"card_replace_photo_{r['_db_id']}",
+                            label_visibility="collapsed"
+                        )
+                        if photo is not None:
+                            try:
+                                new_thumb = make_thumbnail_data_url(photo.getvalue())
+                                if new_thumb:
+                                    update_product_thumbnail(conn, r["_db_id"], new_thumb, replace=True)
+                                    st.success("Zdjęcie zostało zmienione.")
+                                    st.rerun()
+                            except Exception as exc:
+                                st.error(f"Nie udało się zapisać zdjęcia: {exc}")
                 else:
                     st.markdown('<div style="height:120px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:32px;">📷</div>', unsafe_allow_html=True)
                     with st.popover("➕", help="Dodaj zdjęcie do tego produktu"):
@@ -806,7 +830,7 @@ if products:
                             try:
                                 new_thumb = make_thumbnail_data_url(photo.getvalue())
                                 if new_thumb:
-                                    update_product_thumbnail(conn, r["_db_id"], new_thumb)
+                                    update_product_thumbnail(conn, r["_db_id"], new_thumb, replace=True)
                                     st.success("Zdjęcie dodane.")
                                     st.rerun()
                             except Exception as exc:
