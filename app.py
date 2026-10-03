@@ -356,7 +356,7 @@ def public_product_name(r):
     ) or "Produkt"
 
 
-def send_product_inquiry(product, customer_name, customer_email, customer_phone=""):
+def send_product_inquiry(product, customer_name, customer_email, customer_phone="", customer_message=""):
     """Wysyła zapytanie klienta przez SMTP na adres właściciela."""
     host = str(st.secrets.get("SMTP_HOST", "smtp.gmail.com")).strip()
     port = int(st.secrets.get("SMTP_PORT", 587))
@@ -383,6 +383,7 @@ def send_product_inquiry(product, customer_name, customer_email, customer_phone=
         f"Imię: {customer_name.strip()}\n"
         f"E-mail: {customer_email.strip()}\n"
         f"Telefon: {phone_line}\n\n"
+        f"Wiadomość od kupującego:\n{customer_message.strip() or 'Nie podano'}\n\n"
         "Wiadomość została wysłana z publicznego katalogu Paletownii."
     )
 
@@ -403,6 +404,7 @@ def render_inquiry_form(product):
         customer_name = st.text_input("Imię *", placeholder="Np. Jan")
         customer_email = st.text_input("Adres e-mail *", placeholder="Np. jan@example.com")
         customer_phone = st.text_input("Telefon (opcjonalnie)", placeholder="Np. 500 600 700")
+        customer_message = st.text_area("Wiadomość", placeholder="Napisz, o co chcesz zapytać…", height=140)
         submitted = st.form_submit_button("📨 Wyślij zapytanie", type="primary", use_container_width=True)
 
         if submitted:
@@ -414,7 +416,7 @@ def render_inquiry_form(product):
                 st.error("Podaj poprawny adres e-mail.")
             else:
                 try:
-                    send_product_inquiry(product, customer_name, customer_email, customer_phone)
+                    send_product_inquiry(product, customer_name, customer_email, customer_phone, customer_message)
                     st.session_state.inquiry_sent = True
                 except Exception as exc:
                     st.error(f"Nie udało się wysłać wiadomości. {exc}")
@@ -509,17 +511,17 @@ def render_public_catalog(conn):
         st.info("Nie znaleziono produktu.")
         return
 
-    # 3 kolumny na desktopie, naturalne zwijanie na telefonie.
-    for start in range(0, len(filtered), 3):
-        row = filtered[start:start + 3]
-        cols = st.columns(3)
+    # 4 mniejsze karty w jednym wierszu na desktopie.
+    for start in range(0, len(filtered), 4):
+        row = filtered[start:start + 4]
+        cols = st.columns(4)
         for col, r in zip(cols, row):
             with col:
                 thumb = str(r.get("image_thumb") or "")
                 if thumb:
                     st.image(thumb, width="stretch")
                 else:
-                    st.markdown('<div style="height:180px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:42px;">📦</div>', unsafe_allow_html=True)
+                    st.markdown('<div style="height:130px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:42px;">📦</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="public-name">{escape(public_product_name(r))}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="public-price">{r["real_sale_price"]:,.0f} zł</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="public-meta">Dostępne: <b>{r["quantity"]} szt.</b></div>', unsafe_allow_html=True)
