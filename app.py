@@ -2,6 +2,7 @@ import io
 import json
 import re
 import hashlib
+from html import escape
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -325,6 +326,133 @@ def make_excel(products, pallet_name, cost):
     s.column_dimensions['A'].width=40; s.column_dimensions['B'].width=25
     out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue()
 
+
+def load_public_products(conn):
+    """Publiczny katalog: tylko dane potrzebne klientowi."""
+    sql = """
+    SELECT p.id, p.quantity, p.brand, p.product, p.model,
+           p.real_sale_price, p.image_thumb, p.created_at
+    FROM products p
+    WHERE p.quantity > 0
+      AND p.real_sale_price > 0
+    ORDER BY p.updated_at DESC, p.id DESC
+    """
+    df = db_query(conn, sql)
+    rows = df.to_dict("records")
+    for r in rows:
+        r["id"] = int(r["id"])
+        r["quantity"] = int(r["quantity"] or 0)
+        r["real_sale_price"] = float(r["real_sale_price"] or 0)
+    return rows
+
+
+def public_product_name(r):
+    return " ".join(
+        str(x).strip()
+        for x in [r.get("brand", ""), r.get("product", ""), r.get("model", "")]
+        if str(x).strip()
+    ) or "Produkt"
+
+
+def render_public_catalog(conn):
+    """Domyślny, niezalogowany widok katalogu."""
+    public_products = load_public_products(conn)
+
+    st.markdown("""
+    <style>
+    .public-hero {
+        padding: 18px 20px;
+        border-radius: 18px;
+        background: linear-gradient(135deg, #eff6ff 0%, #ffffff 70%);
+        border: 1px solid #dbeafe;
+        margin-bottom: 18px;
+    }
+    .public-card {
+        border: 1px solid #e5e7eb;
+        border-radius: 16px;
+        padding: 12px;
+        background: #fff;
+        box-shadow: 0 1px 4px rgba(0,0,0,.05);
+        height: 100%;
+    }
+    .public-name { font-weight: 700; font-size: 1rem; line-height: 1.3; margin-top: 8px; }
+    .public-price { font-size: 1.25rem; font-weight: 800; margin-top: 7px; }
+    .public-meta { color: #6b7280; font-size: .86rem; margin-top: 3px; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    top_left, top_right = st.columns([5, 1])
+    with top_left:
+        st.markdown('<div class="public-hero"><h1 style="margin:0">📦 Paletownia</h1><div style="color:#64748b;margin-top:4px">Produkty dostępne w sprzedaży</div></div>', unsafe_allow_html=True)
+    with top_right:
+        st.write("")
+        st.caption("")
+        with st.popover("🔐 Zaloguj", use_container_width=True):
+            st.markdown("**Panel właściciela**")
+            pin = st.text_input("PIN", type="password", key="admin_pin_input", label_visibility="collapsed", placeholder="Wpisz PIN")
+            if st.button("Zaloguj", type="primary", use_container_width=True, key="public_login"):
+                configured_pin = str(st.secrets.get("ADMIN_PIN", "")).strip()
+                if configured_pin and pin == configured_pin:
+                    st.session_state.admin_logged_in = True
+                    st.session_state.admin_login_error = False
+                    st.rerun()
+                else:
+                    st.session_state.admin_login_error = True
+                    st.error("Nieprawidłowy PIN.")
+
+    if not public_products:
+        st.info("Aktualnie nie ma produktów dostępnych w katalogu.")
+        if not str(st.secrets.get("ADMIN_PIN", "")).strip():
+            st.caption("Panel właściciela nie jest jeszcze skonfigurowany.")
+        return
+
+    total_units = sum(r["quantity"] for r in public_products)
+    c1, c2 = st.columns(2)
+    c1.metric("Dostępne pozycje", len(public_products))
+    c2.metric("Dostępne sztuki", total_units)
+
+    search = st.text_input("🔎 Szukaj produktu", placeholder="np. Tikom, słuchawki, EZVIZ...", key="public_search")
+    sort_public = st.selectbox(
+        "Sortowanie",
+        ["Najnowsze", "Nazwa A–Z", "Cena — od najwyższej", "Cena — od najniższej"],
+        key="public_sort",
+    )
+
+    filtered = public_products
+    q = search.strip().lower()
+    if q:
+        filtered = [r for r in filtered if q in public_product_name(r).lower()]
+
+    if sort_public == "Nazwa A–Z":
+        filtered = sorted(filtered, key=lambda r: public_product_name(r).lower())
+    elif sort_public == "Cena — od najwyższej":
+        filtered = sorted(filtered, key=lambda r: r["real_sale_price"], reverse=True)
+    elif sort_public == "Cena — od najniższej":
+        filtered = sorted(filtered, key=lambda r: r["real_sale_price"])
+
+    st.markdown(f"**Wyniki: {len(filtered)}**")
+    if not filtered:
+        st.info("Nie znaleziono produktu.")
+        return
+
+    # 3 kolumny na desktopie, naturalne zwijanie na telefonie.
+    for start in range(0, len(filtered), 3):
+        row = filtered[start:start + 3]
+        cols = st.columns(3)
+        for col, r in zip(cols, row):
+            with col:
+                thumb = str(r.get("image_thumb") or "")
+                if thumb:
+                    st.image(thumb, width="stretch")
+                else:
+                    st.markdown('<div style="height:180px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:42px;">📦</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="public-name">{escape(public_product_name(r))}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="public-price">{r["real_sale_price"]:,.0f} zł</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="public-meta">Dostępne: <b>{r["quantity"]} szt.</b></div>', unsafe_allow_html=True)
+                st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
+
+    st.caption("Ceny dotyczą produktów widocznych jako dostępne w Paletownii.")
+
 # Session/UI state only stores current selection and temporary AI result. Actual data is in PostgreSQL.
 if "current_pallet_id" not in st.session_state: st.session_state.current_pallet_id=None
 if "pending" not in st.session_state: st.session_state.pending=None
@@ -340,6 +468,23 @@ if conn:
     except Exception as exc:
         st.error("Nie udało się zainicjalizować bazy danych.")
         st.code(str(exc)); st.stop()
+
+# Domyślnie każdy użytkownik trafia do katalogu publicznego.
+if "admin_logged_in" not in st.session_state:
+    st.session_state.admin_logged_in = False
+
+if not st.session_state.admin_logged_in:
+    render_public_catalog(conn)
+    st.stop()
+
+# Tryb administratora — pełny dotychczasowy interfejs.
+admin_left, admin_right = st.columns([5, 1])
+with admin_left:
+    st.markdown("### 🔐 Paletownia — panel właściciela")
+with admin_right:
+    if st.button("Wyloguj", use_container_width=True, key="admin_logout"):
+        st.session_state.admin_logged_in = False
+        st.rerun()
 
 pallets=load_pallets(conn)
 if pallets.empty:
@@ -378,7 +523,7 @@ with st.sidebar:
     else:
         st.error("Brak OPENAI_API_KEY")
 
-st.title("📦 Paletownik AI")
+st.title("📦 Paletownia")
 st.subheader(f"🗂️ {current['name']}")
 total=total_value(products); units=sum(int(r['Ilość']) for r in products)
 m1,m2,m3,m4=st.columns(4); m1.metric("Pozycje",len(products)); m2.metric("Sztuki",units); m3.metric("Wartość palety",f"{total:,.0f} zł"); m4.metric("Nadwyżka",f"{total-float(current['cost']):,.0f} zł")
