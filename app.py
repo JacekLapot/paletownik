@@ -143,14 +143,29 @@ def db_conn():
 
 
 def db_init(conn):
+    if st.session_state.get("_db_initialized"):
+        return
     with conn.session as s:
         for statement in [x.strip() for x in DB_DDL.split(';') if x.strip()]:
             s.execute(text(statement))
         s.commit()
+    st.session_state["_db_initialized"] = True
 
 
-def db_query(conn, sql, params=None):
-    return conn.query(sql, params=params or {}, ttl=0)
+def _cache_version():
+    # Zmiana tej wersji unieważnia tylko dane bieżącej sesji po zapisie.
+    return int(st.session_state.get("_data_version", 0))
+
+
+def invalidate_data_cache():
+    st.session_state["_data_version"] = _cache_version() + 1
+
+
+def db_query(conn, sql, params=None, ttl=5):
+    # SQLConnection.query cache'uje wynik. Dodajemy wersję sesji do komentarza SQL,
+    # dzięki czemu po zapisie użytkownik od razu dostaje świeże dane.
+    versioned_sql = f"{sql.rstrip()}\n/* paletownia_data_version={_cache_version()} */"
+    return conn.query(versioned_sql, params=params or {}, ttl=ttl)
 
 
 def ensure_first_pallet(conn):
@@ -161,6 +176,7 @@ def ensure_first_pallet(conn):
                                {"name":"Nowa paleta", "cost":360})
             pid = result.scalar_one()
             s.commit()
+        invalidate_data_cache()
         return int(pid)
     return int(df.iloc[0]["id"])
 
@@ -212,7 +228,7 @@ def make_thumbnail_data_url(image_bytes, max_size=1000):
 
 def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
     row = {
-        "position": len(load_products(conn, pallet_id)) + 1,
+        "position": 1,
         "quantity": int(quantity), "category": data["kategoria"], "brand": data["marka"],
         "product": data["produkt"], "model": data["model"], "state": data["stan"],
         "completeness": data["kompletnosc"], "new_price": data["cena_nowego"], "used_price": data["cena_uzywanego"],
@@ -222,6 +238,11 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         "image_thumb": image_thumb or "", "sale_status": "Na stanie"
     }
     with conn.session as s:
+        max_position = s.execute(
+            text("SELECT COALESCE(MAX(position), 0) + 1 FROM products WHERE pallet_id=:p"),
+            {"p": int(pallet_id)},
+        ).scalar_one()
+        row["position"] = int(max_position)
         result = s.execute(text("""
             INSERT INTO products (pallet_id, position, quantity, category, brand, product, model, state, completeness,
                 new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority, image_thumb, sale_status)
@@ -231,6 +252,7 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         """), {"pallet_id":int(pallet_id), **row})
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=:id"), {"id":int(pallet_id)})
         s.commit()
+    invalidate_data_cache()
     return int(result.scalar_one())
 
 
@@ -248,6 +270,7 @@ def update_product(conn, product_id, quantity, real_price, listing_price, priori
         s.execute(text(f"UPDATE products SET {sets}, updated_at=NOW() WHERE id=:id"), params)
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {"id":int(product_id)})
         s.commit()
+    invalidate_data_cache()
 
 
 def update_product_thumbnail(conn, product_id, image_thumb, replace=False):
@@ -261,6 +284,7 @@ def update_product_thumbnail(conn, product_id, image_thumb, replace=False):
             s.execute(text("UPDATE products SET image_thumb=:img, updated_at=NOW() WHERE id=:id AND COALESCE(image_thumb, '')=''"),
                       {"img": image_thumb, "id": int(product_id)})
         s.commit()
+    invalidate_data_cache()
 
 
 def update_sale_status(conn, product_id, status, sold_price=0):
@@ -278,6 +302,7 @@ def update_sale_status(conn, product_id, status, sold_price=0):
         s.execute(text(sql), params)
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {"id": int(product_id)})
         s.commit()
+    invalidate_data_cache()
 
 
 def delete_product(conn, product_id):
@@ -290,6 +315,7 @@ def delete_product(conn, product_id):
                         UPDATE products SET position=numbered.rn FROM numbered WHERE products.id=numbered.id"""), {"p":pallet_id})
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=:p"), {"p":pallet_id})
         s.commit()
+    invalidate_data_cache()
 
 
 def update_pallet(conn, pallet_id, name, cost):
@@ -297,6 +323,7 @@ def update_pallet(conn, pallet_id, name, cost):
         s.execute(text("UPDATE pallets SET name=:name, cost=:cost, updated_at=NOW() WHERE id=:id"),
                   {"name":name.strip() or "Bez nazwy", "cost":float(cost), "id":int(pallet_id)})
         s.commit()
+    invalidate_data_cache()
 
 
 def create_pallet(conn, name="Nowa paleta", cost=360):
@@ -305,6 +332,7 @@ def create_pallet(conn, name="Nowa paleta", cost=360):
                            {"name":name.strip() or "Nowa paleta", "cost":float(cost)})
         pid = int(result.scalar_one())
         s.commit()
+    invalidate_data_cache()
     return pid
 
 
@@ -312,6 +340,7 @@ def delete_pallet(conn, pallet_id):
     with conn.session as s:
         s.execute(text("DELETE FROM pallets WHERE id=:id"), {"id":int(pallet_id)})
         s.commit()
+    invalidate_data_cache()
 
 
 def total_value(products):
@@ -331,9 +360,12 @@ def find_duplicate(products, data):
     return None
 
 
+@st.cache_resource
 def get_client():
-    try: key = st.secrets["OPENAI_API_KEY"]
-    except Exception: key = ""
+    try:
+        key = st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        key = ""
     return OpenAI(api_key=key) if key else None
 
 
@@ -612,6 +644,8 @@ def render_public_catalog(conn):
     st.caption("Ceny dotyczą produktów widocznych jako dostępne w Paletownii.")
 
 # Session/UI state only stores current selection and temporary AI result. Actual data is in PostgreSQL.
+if "_data_version" not in st.session_state: st.session_state._data_version = 0
+if "_db_initialized" not in st.session_state: st.session_state._db_initialized = False
 if "current_pallet_id" not in st.session_state: st.session_state.current_pallet_id=None
 if "pending" not in st.session_state: st.session_state.pending=None
 if "last_analyzed_hash" not in st.session_state: st.session_state.last_analyzed_hash=None
