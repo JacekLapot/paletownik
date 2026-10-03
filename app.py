@@ -2,8 +2,6 @@ import io
 import json
 import re
 import hashlib
-import smtplib
-from email.message import EmailMessage
 from html import escape
 from datetime import datetime, timezone
 
@@ -357,42 +355,62 @@ def public_product_name(r):
 
 
 def send_product_inquiry(product, customer_name, customer_email, customer_phone="", customer_message=""):
-    """Wysyła zapytanie klienta przez SMTP na adres właściciela."""
-    host = str(st.secrets.get("SMTP_HOST", "smtp.gmail.com")).strip()
-    port = int(st.secrets.get("SMTP_PORT", 587))
-    username = str(st.secrets.get("SMTP_USERNAME", "")).strip()
-    password = str(st.secrets.get("SMTP_PASSWORD", "")).strip()
-    recipient = str(st.secrets.get("CONTACT_EMAIL", "alfa.alwaysfair@gmail.com")).strip()
+    """Wysyła zapytanie klienta przez Resend API na adres właściciela."""
+    import urllib.request
+    import urllib.error
 
-    if not username or not password or not recipient:
+    api_key = str(st.secrets.get("RESEND_API_KEY", "")).strip()
+    recipient = str(st.secrets.get("CONTACT_EMAIL", "alfa.alwaysfair@gmail.com")).strip()
+    sender = str(st.secrets.get("RESEND_FROM", "onboarding@resend.dev")).strip()
+
+    if not api_key or not recipient or not sender:
         raise RuntimeError("Formularz kontaktowy nie jest jeszcze skonfigurowany.")
 
     product_name = public_product_name(product)
     price = float(product.get("real_sale_price", 0) or 0)
     phone_line = customer_phone.strip() if customer_phone else "Nie podano"
+    message_text = customer_message.strip() or "Nie podano"
 
-    msg = EmailMessage()
-    msg["Subject"] = f"Zapytanie o produkt — {product_name}"
-    msg["From"] = username
-    msg["To"] = recipient
-    msg["Reply-To"] = customer_email.strip()
-    msg.set_content(
+    subject = f"Zapytanie o produkt — {product_name}"
+    body = (
         "Nowe zapytanie z Paletownii\n\n"
         f"Produkt: {product_name}\n"
         f"Cena: {price:.2f} zł\n"
         f"Imię: {customer_name.strip()}\n"
         f"E-mail: {customer_email.strip()}\n"
         f"Telefon: {phone_line}\n\n"
-        f"Wiadomość od kupującego:\n{customer_message.strip() or 'Nie podano'}\n\n"
+        f"Wiadomość od kupującego:\n{message_text}\n\n"
         "Wiadomość została wysłana z publicznego katalogu Paletownii."
     )
 
-    with smtplib.SMTP(host, port, timeout=20) as smtp:
-        smtp.ehlo()
-        smtp.starttls()
-        smtp.ehlo()
-        smtp.login(username, password)
-        smtp.send_message(msg)
+    payload = {
+        "from": sender,
+        "to": [recipient],
+        "reply_to": customer_email.strip(),
+        "subject": subject,
+        "text": body,
+    }
+
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            response_body = response.read().decode("utf-8")
+            if response.status < 200 or response.status >= 300:
+                raise RuntimeError(f"Resend HTTP {response.status}: {response_body}")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Resend HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Nie można połączyć się z Resend: {exc.reason}") from exc
 
 
 def render_inquiry_form(product):
