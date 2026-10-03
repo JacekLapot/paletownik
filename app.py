@@ -2,6 +2,8 @@ import io
 import json
 import re
 import hashlib
+import smtplib
+from email.message import EmailMessage
 from html import escape
 from datetime import datetime, timezone
 
@@ -354,6 +356,78 @@ def public_product_name(r):
     ) or "Produkt"
 
 
+def send_product_inquiry(product, customer_name, customer_email, customer_phone=""):
+    """Wysyła zapytanie klienta przez SMTP na adres właściciela."""
+    host = str(st.secrets.get("SMTP_HOST", "smtp.gmail.com")).strip()
+    port = int(st.secrets.get("SMTP_PORT", 587))
+    username = str(st.secrets.get("SMTP_USERNAME", "")).strip()
+    password = str(st.secrets.get("SMTP_PASSWORD", "")).strip()
+    recipient = str(st.secrets.get("CONTACT_EMAIL", "alfa.alwaysfair@gmail.com")).strip()
+
+    if not username or not password or not recipient:
+        raise RuntimeError("Formularz kontaktowy nie jest jeszcze skonfigurowany.")
+
+    product_name = public_product_name(product)
+    price = float(product.get("real_sale_price", 0) or 0)
+    phone_line = customer_phone.strip() if customer_phone else "Nie podano"
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Zapytanie o produkt — {product_name}"
+    msg["From"] = username
+    msg["To"] = recipient
+    msg["Reply-To"] = customer_email.strip()
+    msg.set_content(
+        "Nowe zapytanie z Paletownii\n\n"
+        f"Produkt: {product_name}\n"
+        f"Cena: {price:.2f} zł\n"
+        f"Imię: {customer_name.strip()}\n"
+        f"E-mail: {customer_email.strip()}\n"
+        f"Telefon: {phone_line}\n\n"
+        "Wiadomość została wysłana z publicznego katalogu Paletownii."
+    )
+
+    with smtplib.SMTP(host, port, timeout=20) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
+        smtp.login(username, password)
+        smtp.send_message(msg)
+
+
+def render_inquiry_form(product):
+    """Formularz zapytania o konkretny produkt."""
+    st.markdown("### ✉️ Zapytaj o produkt")
+    st.markdown(f"**{escape(public_product_name(product))}** · **{float(product.get('real_sale_price', 0) or 0):,.0f} zł**")
+
+    with st.form("product_inquiry_form", clear_on_submit=True):
+        customer_name = st.text_input("Imię *", placeholder="Np. Jan")
+        customer_email = st.text_input("Adres e-mail *", placeholder="Np. jan@example.com")
+        customer_phone = st.text_input("Telefon (opcjonalnie)", placeholder="Np. 500 600 700")
+        submitted = st.form_submit_button("📨 Wyślij zapytanie", type="primary", use_container_width=True)
+
+        if submitted:
+            name_ok = bool(customer_name.strip())
+            email_ok = bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", customer_email.strip()))
+            if not name_ok:
+                st.error("Podaj imię.")
+            elif not email_ok:
+                st.error("Podaj poprawny adres e-mail.")
+            else:
+                try:
+                    send_product_inquiry(product, customer_name, customer_email, customer_phone)
+                    st.session_state.inquiry_sent = True
+                except Exception as exc:
+                    st.error(f"Nie udało się wysłać wiadomości. {exc}")
+
+    if st.session_state.get("inquiry_sent"):
+        st.success("✅ Dziękujemy! Zapytanie zostało wysłane. Skontaktujemy się z Tobą.")
+        st.session_state.inquiry_sent = False
+
+    if st.button("← Wróć do katalogu", key="back_to_catalog"):
+        st.session_state.selected_inquiry_product = None
+        st.rerun()
+
+
 def render_public_catalog(conn):
     """Domyślny, niezalogowany widok katalogu."""
     public_products = load_public_products(conn)
@@ -449,6 +523,9 @@ def render_public_catalog(conn):
                 st.markdown(f'<div class="public-name">{escape(public_product_name(r))}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="public-price">{r["real_sale_price"]:,.0f} zł</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="public-meta">Dostępne: <b>{r["quantity"]} szt.</b></div>', unsafe_allow_html=True)
+                if st.button("Zapytaj o produkt", key=f"ask_product_{r["id"]}", use_container_width=True, type="secondary"):
+                    st.session_state.selected_inquiry_product = int(r["id"])
+                    st.rerun()
                 st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
 
     st.caption("Ceny dotyczą produktów widocznych jako dostępne w Paletownii.")
@@ -472,9 +549,22 @@ if conn:
 # Domyślnie każdy użytkownik trafia do katalogu publicznego.
 if "admin_logged_in" not in st.session_state:
     st.session_state.admin_logged_in = False
+if "selected_inquiry_product" not in st.session_state:
+    st.session_state.selected_inquiry_product = None
+if "inquiry_sent" not in st.session_state:
+    st.session_state.inquiry_sent = False
 
 if not st.session_state.admin_logged_in:
-    render_public_catalog(conn)
+    if st.session_state.selected_inquiry_product is not None:
+        public_products_for_form = load_public_products(conn)
+        selected_product = next((r for r in public_products_for_form if r["id"] == int(st.session_state.selected_inquiry_product)), None)
+        if selected_product is None:
+            st.session_state.selected_inquiry_product = None
+            st.rerun()
+        else:
+            render_inquiry_form(selected_product)
+    else:
+        render_public_catalog(conn)
     st.stop()
 
 # Tryb administratora — pełny dotychczasowy interfejs.
