@@ -2,6 +2,7 @@ import io
 import json
 import re
 import hashlib
+import os
 from html import escape
 from datetime import datetime, timezone
 
@@ -354,17 +355,51 @@ def public_product_name(r):
     ) or "Produkt"
 
 
+def _secret_value(name, default=""):
+    """Odczytuje sekret z Streamlit Secrets lub środowiska."""
+    try:
+        value = st.secrets.get(name, None)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    except Exception:
+        pass
+
+    value = os.environ.get(name, "")
+    if str(value).strip():
+        return str(value).strip()
+
+    # Dopuszczamy również sekcję [resend] w Secrets, gdyby ktoś tak ją skonfigurował.
+    if name == "RESEND_API_KEY":
+        try:
+            section = st.secrets.get("resend", {})
+            if isinstance(section, dict):
+                value = section.get("api_key", "")
+                if str(value).strip():
+                    return str(value).strip()
+        except Exception:
+            pass
+    return str(default).strip()
+
+
 def send_product_inquiry(product, customer_name, customer_email, customer_phone="", customer_message=""):
-    """Wysyła zapytanie klienta przez Resend API na adres właściciela."""
-    import urllib.request
-    import urllib.error
+    """Wysyła zapytanie klienta przez oficjalne Resend API."""
+    import resend
 
-    api_key = str(st.secrets.get("RESEND_API_KEY", "")).strip()
-    recipient = str(st.secrets.get("CONTACT_EMAIL", "alfa.alwaysfair@gmail.com")).strip()
-    sender = str(st.secrets.get("RESEND_FROM", "onboarding@resend.dev")).strip()
+    api_key = _secret_value("RESEND_API_KEY")
+    recipient = _secret_value("CONTACT_EMAIL", "alfa.alwaysfair@gmail.com")
+    sender = _secret_value("RESEND_FROM", "onboarding@resend.dev")
 
-    if not api_key or not recipient or not sender:
-        raise RuntimeError("Formularz kontaktowy nie jest jeszcze skonfigurowany.")
+    if not api_key:
+        raise RuntimeError(
+            "Brak RESEND_API_KEY w Streamlit Secrets. "
+            "Dodaj go jako sekret główny: RESEND_API_KEY = \"re_...\" i zapisz ustawienia. "
+            "Po zmianie Secrets zrestartuj aplikację."
+        )
+
+    if not recipient:
+        raise RuntimeError("Brak CONTACT_EMAIL w Streamlit Secrets.")
+    if not sender:
+        raise RuntimeError("Brak RESEND_FROM w Streamlit Secrets.")
 
     product_name = public_product_name(product)
     price = float(product.get("real_sale_price", 0) or 0)
@@ -383,7 +418,8 @@ def send_product_inquiry(product, customer_name, customer_email, customer_phone=
         "Wiadomość została wysłana z publicznego katalogu Paletownii."
     )
 
-    payload = {
+    resend.api_key = api_key
+    params = {
         "from": sender,
         "to": [recipient],
         "reply_to": customer_email.strip(),
@@ -391,26 +427,17 @@ def send_product_inquiry(product, customer_name, customer_email, customer_phone=
         "text": body,
     }
 
-    request = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            response_body = response.read().decode("utf-8")
-            if response.status < 200 or response.status >= 300:
-                raise RuntimeError(f"Resend HTTP {response.status}: {response_body}")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Resend HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Nie można połączyć się z Resend: {exc.reason}") from exc
+        result = resend.Emails.send(params)
+        # SDK może zwrócić obiekt z polem error albo rzucić wyjątek.
+        error = getattr(result, "error", None)
+        if error:
+            raise RuntimeError(f"Resend: {error}")
+        return result
+    except Exception as exc:
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"Resend: {exc}") from exc
 
 
 def render_inquiry_form(product):
