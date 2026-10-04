@@ -36,7 +36,7 @@ FIELDS = [
     "Lp.", "Ilość", "Kategoria", "Marka", "Produkt", "Model", "Stan",
     "Kompletność", "Cena nowego", "Cena używanego", "Realna cena sprzedaży",
     "Cena wystawienia", "Źródło ceny", "Link do oferty", "Uwagi", "Priorytet",
-    "Status sprzedaży", "Cena sprzedaży", "Data wystawienia", "Data sprzedaży"
+    "Status sprzedaży", "Cena sprzedaży", "Prowizja", "Finalna wartość sprzedaży", "Data wystawienia", "Data sprzedaży"
 ]
 PRIORITIES = ["🟡 Priorytet", "🟢 Ważne", "🟠 Mogą poczekać", "🔴 Badziew"]
 
@@ -121,12 +121,16 @@ CREATE TABLE IF NOT EXISTS products (
     image_thumb TEXT NOT NULL DEFAULT '',
     sale_status TEXT NOT NULL DEFAULT 'Na stanie',
     sold_price NUMERIC(12,2) NOT NULL DEFAULT 0,
+    commission NUMERIC(12,2) NOT NULL DEFAULT 0,
+    net_sale_price NUMERIC(12,2) NOT NULL DEFAULT 0,
     listed_at TIMESTAMPTZ NULL,
     sold_at TIMESTAMPTZ NULL
 );
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_thumb TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sale_status TEXT NOT NULL DEFAULT 'Na stanie';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_price NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS commission NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS net_sale_price NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS listed_at TIMESTAMPTZ NULL;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ NULL;
 CREATE INDEX IF NOT EXISTS idx_products_pallet_id ON products(pallet_id);
@@ -192,7 +196,7 @@ def load_products(conn, pallet_id):
            new_price AS \"Cena nowego\", used_price AS \"Cena używanego\", real_sale_price AS \"Realna cena sprzedaży\",
            listing_price AS \"Cena wystawienia\", price_source AS \"Źródło ceny\", offer_link AS \"Link do oferty\",
            notes AS \"Uwagi\", priority AS \"Priorytet\", image_thumb AS \"Miniatura\",
-           sale_status AS \"Status sprzedaży\", sold_price AS \"Cena sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\"
+           sale_status AS \"Status sprzedaży\", sold_price AS \"Cena sprzedaży\", commission AS \"Prowizja\", net_sale_price AS \"Finalna wartość sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\"
     FROM products WHERE pallet_id = :pallet_id ORDER BY position, id
     """
     df = db_query(conn, sql, {"pallet_id": int(pallet_id)})
@@ -203,6 +207,8 @@ def load_products(conn, pallet_id):
         r["Priorytet"] = priority_from_price(r["Realna cena sprzedaży"])
         r["Ilość"] = int(r["Ilość"] or 1)
         r["Cena sprzedaży"] = float(r.get("Cena sprzedaży") or 0)
+        r["Prowizja"] = float(r.get("Prowizja") or 0)
+        r["Finalna wartość sprzedaży"] = float(r.get("Finalna wartość sprzedaży") or max(0, r["Cena sprzedaży"] - r["Prowizja"]))
         r["Status sprzedaży"] = str(r.get("Status sprzedaży") or "Na stanie")
         r["Lp."] = int(r["Lp."])
         r["_db_id"] = int(r["id"])
@@ -287,18 +293,27 @@ def update_product_thumbnail(conn, product_id, image_thumb, replace=False):
     invalidate_data_cache()
 
 
-def update_sale_status(conn, product_id, status, sold_price=0):
-    """Zmienia status sprzedaży produktu i zapisuje cenę sprzedaży."""
+def update_sale_status(conn, product_id, status, sold_price=0, commission=0):
+    """Zmienia status sprzedaży produktu i zapisuje cenę, prowizję oraz kwotę po prowizji."""
     allowed = {"Na stanie", "Wystawiony", "Sprzedany"}
     status = status if status in allowed else "Na stanie"
+    sold_price = max(0.0, float(sold_price or 0))
+    commission = max(0.0, float(commission or 0))
+    net_sale_price = max(0.0, sold_price - commission) if status == "Sprzedany" else 0.0
     with conn.session as s:
-        params = {"id": int(product_id), "status": status, "sold_price": float(sold_price or 0)}
+        params = {
+            "id": int(product_id),
+            "status": status,
+            "sold_price": sold_price,
+            "commission": commission,
+            "net_sale_price": net_sale_price,
+        }
         if status == "Wystawiony":
-            sql = """UPDATE products SET sale_status=:status, sold_price=0, listed_at=COALESCE(listed_at, NOW()), sold_at=NULL, updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, sold_price=0, commission=0, net_sale_price=0, listed_at=COALESCE(listed_at, NOW()), sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         elif status == "Sprzedany":
-            sql = """UPDATE products SET sale_status=:status, sold_price=:sold_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, sold_price=:sold_price, commission=:commission, net_sale_price=:net_sale_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
         else:
-            sql = """UPDATE products SET sale_status=:status, sold_price=0, sold_at=NULL, updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, sold_price=0, commission=0, net_sale_price=0, sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         s.execute(text(sql), params)
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {"id": int(product_id)})
         s.commit()
@@ -383,23 +398,18 @@ def analyze_image(image_bytes, mime_type):
 
 
 def make_excel(products, pallet_name, cost):
-    # Excel (.xlsx) nie obsługuje datetime z informacją o strefie czasowej.
-    # PostgreSQL zwraca pola TIMESTAMPTZ jako datetime z tzinfo, więc przed
-    # zapisaniem arkusza usuwamy tylko informację o strefie czasowej.
-    def excel_safe_value(value):
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=None)
-        return value
-
     wb=Workbook(); ws=wb.active; ws.title="Produkty"; ws.append(FIELDS)
     fill=PatternFill("solid",fgColor="D9EAF7")
     for c in ws[1]: c.font=Font(bold=True); c.fill=fill; c.alignment=Alignment(horizontal="center")
-    for row in products:
-        ws.append([excel_safe_value(row.get(f, "")) for f in FIELDS])
+    for row in products: ws.append([row.get(f,"") for f in FIELDS])
     ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
-    for i,w in enumerate([7,9,22,18,30,18,22,25,16,18,24,18,25,45,45,28,18,18,20,20],1): ws.column_dimensions[__import__('openpyxl').utils.get_column_letter(i)].width=w
+    for i,w in enumerate([7,9,22,18,30,18,22,25,16,18,24,18,25,45,45,28,18,18,18,22,20,20],1): ws.column_dimensions[__import__('openpyxl').utils.get_column_letter(i)].width=w
     s=wb.create_sheet("Podsumowanie"); s["A1"]="PODSUMOWANIE PALETY"; s["A1"].font=Font(bold=True,size=16)
-    vals=[("Nazwa palety",pallet_name),("Liczba pozycji",len(products)),("Liczba sztuk",sum(int(r['Ilość']) for r in products)),("Koszt palety",cost),("Realna wartość sprzedaży",total_value(products)),("Nadwyżka przed kosztami sprzedaży",total_value(products)-cost)]
+    sold_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Sprzedany"]
+    gross_sales = sum(float(r.get("Cena sprzedaży", 0) or 0) for r in sold_rows)
+    commissions = sum(float(r.get("Prowizja", 0) or 0) for r in sold_rows)
+    net_sales = sum(float(r.get("Finalna wartość sprzedaży", max(0, float(r.get("Cena sprzedaży", 0) or 0) - float(r.get("Prowizja", 0) or 0))) or 0) for r in sold_rows)
+    vals=[("Nazwa palety",pallet_name),("Liczba pozycji",len(products)),("Liczba sztuk",sum(int(r['Ilość']) for r in products)),("Koszt palety",cost),("Realna wartość sprzedaży",total_value(products)),("Sprzedaż brutto z oznaczonych jako sprzedane",gross_sales),("Prowizje",commissions),("Finalna wartość sprzedaży po prowizjach",net_sales),("Nadwyżka przed kosztami sprzedaży",total_value(products)-cost)]
     for i,(a,b) in enumerate(vals,2): s.cell(i,1,a); s.cell(i,2,b)
     s.column_dimensions['A'].width=40; s.column_dimensions['B'].width=25
     out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue()
@@ -746,14 +756,7 @@ st.divider()
 c1,c2=st.columns(2)
 with c1:
     st.subheader("📸 Zrób zdjęcie")
-    # Po każdym przetworzonym zdjęciu zwiększamy numer klucza. Dzięki temu
-    # kamera jest od razu gotowa na kolejne zdjęcie — bez ręcznego „Clear photo”.
-    camera_key_version = int(st.session_state.get("camera_key_version", 0))
-    camera=st.camera_input(
-        "Aparat",
-        key=f"camera_{st.session_state.current_pallet_id}_{camera_key_version}",
-        resolution="720p"
-    )
+    camera=st.camera_input("Aparat", key=f"camera_{st.session_state.current_pallet_id}", resolution="720p")
 with c2:
     st.subheader("📁 Wybierz z urządzenia")
     upload=st.file_uploader("Zdjęcie produktu", type=["jpg","jpeg","png","webp"], key=f"uploader_{st.session_state.current_pallet_id}")
@@ -785,9 +788,6 @@ if image_file is not None:
                         "kind":"new", "name":f"{data['marka']} {data['produkt']} {data['model']}".strip(),
                         "quantity":1, "price":float(data["realna_cena_sprzedazy"]), "link":data.get("link_do_oferty", "")
                     }
-                # Zresetuj widget kamery przed kolejnym przebiegiem aplikacji.
-                # Użytkownik od razu dostaje ponownie możliwość zrobienia zdjęcia.
-                st.session_state.camera_key_version = int(st.session_state.get("camera_key_version", 0)) + 1
                 st.rerun()
             except Exception as exc:
                 st.session_state.last_analyzed_hash=None
@@ -848,10 +848,11 @@ if products:
     sold_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Sprzedany"]
     listed_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Wystawiony"]
     available_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") != "Sprzedany"]
-    sm1, sm2, sm3 = st.columns(3)
+    sm1, sm2, sm3, sm4 = st.columns(4)
     with sm1: st.metric("🟢 Wystawione", len(listed_rows))
     with sm2: st.metric("🔴 Sprzedane", len(sold_rows))
-    with sm3: st.metric("💰 Przychód ze sprzedanych", f"{sum(float(r.get('Cena sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
+    with sm3: st.metric("💰 Sprzedaż brutto", f"{sum(float(r.get('Cena sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
+    with sm4: st.metric("💵 Po prowizji", f"{sum(float(r.get('Finalna wartość sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
     # Mobile-first card view: much easier to scan on a phone than a wide dataframe.
     st.markdown("""
     <style>
@@ -938,7 +939,10 @@ if products:
                 status = str(r.get("Status sprzedaży") or "Na stanie")
                 status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
                 if status == "Sprzedany":
-                    st.markdown(f"**{status_icon} Sprzedany** · cena sprzedaży: **{float(r.get('Cena sprzedaży',0)):.0f} zł**")
+                    gross = float(r.get("Cena sprzedaży", 0) or 0)
+                    commission = float(r.get("Prowizja", 0) or 0)
+                    net = float(r.get("Finalna wartość sprzedaży", max(0, gross - commission)) or 0)
+                    st.markdown(f"**{status_icon} Sprzedany** · sprzedaż: **{gross:.0f} zł** · prowizja: **{commission:.0f} zł** · po prowizji: **{net:.0f} zł**")
                 else:
                     st.markdown(f"**{status_icon} {status}**")
 
@@ -954,10 +958,16 @@ if products:
                         "Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży",0) or 0), step=5.0,
                         key=f"sold_price_{r['_db_id']}"
                     )
+                    commission = st.number_input(
+                        "Prowizja", min_value=0.0, value=float(r.get("Prowizja",0) or 0), step=1.0,
+                        key=f"commission_{r['_db_id']}"
+                    )
+                    st.metric("💵 Finalna wartość sprzedaży", f"{max(0.0, sold_price - commission):.2f} zł")
                 else:
                     sold_price = 0.0
+                    commission = 0.0
                 if st.button("💾 Zapisz status", key=f"save_sale_{r['_db_id']}", use_container_width=True):
-                    update_sale_status(conn, r["_db_id"], new_status, sold_price)
+                    update_sale_status(conn, r["_db_id"], new_status, sold_price, commission)
                     st.success("Status sprzedaży zapisany.")
                     st.rerun()
 
@@ -1018,11 +1028,17 @@ if products:
         st.markdown("**💰 Status sprzedaży**")
         current_status = str(row.get("Status sprzedaży") or "Na stanie")
         manual_status = st.selectbox("Status", ["Na stanie", "Wystawiony", "Sprzedany"], index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0, key=f"manual_sale_status_{row['_db_id']}")
-        manual_sold_price = st.number_input("Za ile sprzedano?", min_value=0.0, value=float(row.get("Cena sprzedaży",0) or 0), step=5.0, key=f"manual_sold_price_{row['_db_id']}") if manual_status == "Sprzedany" else 0.0
+        if manual_status == "Sprzedany":
+            manual_sold_price = st.number_input("Za ile sprzedano?", min_value=0.0, value=float(row.get("Cena sprzedaży",0) or 0), step=5.0, key=f"manual_sold_price_{row['_db_id']}")
+            manual_commission = st.number_input("Prowizja", min_value=0.0, value=float(row.get("Prowizja",0) or 0), step=1.0, key=f"manual_commission_{row['_db_id']}")
+            st.metric("💵 Finalna wartość sprzedaży", f"{max(0.0, manual_sold_price - manual_commission):.2f} zł")
+        else:
+            manual_sold_price = 0.0
+            manual_commission = 0.0
         st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
         if st.button("💾 Zapisz zmiany",use_container_width=True):
             update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer,new_product_name)
-            update_sale_status(conn,row['_db_id'],manual_status,manual_sold_price)
+            update_sale_status(conn,row['_db_id'],manual_status,manual_sold_price,manual_commission)
             st.rerun()
         if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
