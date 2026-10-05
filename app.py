@@ -3,6 +3,7 @@ import json
 import re
 import hashlib
 import os
+import requests
 from html import escape
 from datetime import datetime, timezone
 
@@ -35,8 +36,8 @@ st.markdown(
 FIELDS = [
     "Lp.", "Ilość", "Kategoria", "Marka", "Produkt", "Model", "Stan",
     "Kompletność", "Cena nowego", "Cena używanego", "Realna cena sprzedaży",
-    "Cena wystawienia", "Źródło ceny", "Link do oferty", "Uwagi", "Priorytet",
-    "Status sprzedaży", "Cena sprzedaży", "Prowizja", "Finalna wartość sprzedaży", "Data wystawienia", "Data sprzedaży"
+    "Cena wystawienia", "Źródło ceny", "Link do oferty", "Link do Allegro", "Cena Allegro", "Kategoria Allegro", "Uwagi", "Priorytet",
+    "Status sprzedaży", "Cena sprzedaży", "Data wystawienia", "Data sprzedaży"
 ]
 PRIORITIES = ["🟡 Priorytet", "🟢 Ważne", "🟠 Mogą poczekać", "🔴 Badziew"]
 
@@ -114,6 +115,10 @@ CREATE TABLE IF NOT EXISTS products (
     listing_price NUMERIC(12,2) NOT NULL DEFAULT 0,
     price_source TEXT NOT NULL DEFAULT '',
     offer_link TEXT NOT NULL DEFAULT '',
+    allegro_link TEXT NOT NULL DEFAULT '',
+    allegro_price NUMERIC(12,2) NOT NULL DEFAULT 0,
+    allegro_image TEXT NOT NULL DEFAULT '',
+    allegro_category TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
     priority TEXT NOT NULL DEFAULT 'Ważne',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -121,16 +126,16 @@ CREATE TABLE IF NOT EXISTS products (
     image_thumb TEXT NOT NULL DEFAULT '',
     sale_status TEXT NOT NULL DEFAULT 'Na stanie',
     sold_price NUMERIC(12,2) NOT NULL DEFAULT 0,
-    commission NUMERIC(12,2) NOT NULL DEFAULT 0,
-    net_sale_price NUMERIC(12,2) NOT NULL DEFAULT 0,
     listed_at TIMESTAMPTZ NULL,
     sold_at TIMESTAMPTZ NULL
 );
+ALTER TABLE products ADD COLUMN IF NOT EXISTS allegro_link TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS allegro_price NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS allegro_image TEXT NOT NULL DEFAULT '';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS allegro_category TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_thumb TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sale_status TEXT NOT NULL DEFAULT 'Na stanie';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_price NUMERIC(12,2) NOT NULL DEFAULT 0;
-ALTER TABLE products ADD COLUMN IF NOT EXISTS commission NUMERIC(12,2) NOT NULL DEFAULT 0;
-ALTER TABLE products ADD COLUMN IF NOT EXISTS net_sale_price NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS listed_at TIMESTAMPTZ NULL;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ NULL;
 CREATE INDEX IF NOT EXISTS idx_products_pallet_id ON products(pallet_id);
@@ -196,7 +201,7 @@ def load_products(conn, pallet_id):
            new_price AS \"Cena nowego\", used_price AS \"Cena używanego\", real_sale_price AS \"Realna cena sprzedaży\",
            listing_price AS \"Cena wystawienia\", price_source AS \"Źródło ceny\", offer_link AS \"Link do oferty\",
            notes AS \"Uwagi\", priority AS \"Priorytet\", image_thumb AS \"Miniatura\",
-           sale_status AS \"Status sprzedaży\", sold_price AS \"Cena sprzedaży\", commission AS \"Prowizja\", net_sale_price AS \"Finalna wartość sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\"
+           sale_status AS \"Status sprzedaży\", sold_price AS \"Cena sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\"
     FROM products WHERE pallet_id = :pallet_id ORDER BY position, id
     """
     df = db_query(conn, sql, {"pallet_id": int(pallet_id)})
@@ -205,10 +210,11 @@ def load_products(conn, pallet_id):
         for k in ["Cena nowego","Cena używanego","Realna cena sprzedaży","Cena wystawienia"]:
             r[k] = float(r[k] or 0)
         r["Priorytet"] = priority_from_price(r["Realna cena sprzedaży"])
+        r["Cena Allegro"] = float(r.get("Cena Allegro") or 0)
+        r["Zdjęcie Allegro"] = str(r.get("Zdjęcie Allegro") or "")
+        r["Kategoria Allegro"] = str(r.get("Kategoria Allegro") or "")
         r["Ilość"] = int(r["Ilość"] or 1)
         r["Cena sprzedaży"] = float(r.get("Cena sprzedaży") or 0)
-        r["Prowizja"] = float(r.get("Prowizja") or 0)
-        r["Finalna wartość sprzedaży"] = float(r.get("Finalna wartość sprzedaży") or max(0, r["Cena sprzedaży"] - r["Prowizja"]))
         r["Status sprzedaży"] = str(r.get("Status sprzedaży") or "Na stanie")
         r["Lp."] = int(r["Lp."])
         r["_db_id"] = int(r["id"])
@@ -232,6 +238,156 @@ def make_thumbnail_data_url(image_bytes, max_size=1000):
         return ""
 
 
+
+def _extract_jsonld_objects(html):
+    """Wyciąga obiekty JSON-LD z publicznej strony Allegro."""
+    import html as _html
+    blocks = re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, flags=re.I|re.S)
+    objects = []
+    for block in blocks:
+        try:
+            obj = json.loads(_html.unescape(block.strip()))
+            if isinstance(obj, list):
+                objects.extend(obj)
+            else:
+                objects.append(obj)
+        except Exception:
+            continue
+    return objects
+
+
+def download_allegro_image(image_url):
+    """Pobiera główne zdjęcie Allegro i zapisuje je jako lokalną miniaturę w bazie."""
+    image_url = str(image_url or "").strip()
+    if not image_url:
+        return ""
+    try:
+        resp = requests.get(
+            image_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+                "Referer": "https://allegro.pl/",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return make_thumbnail_data_url(resp.content, max_size=1200)
+    except Exception:
+        return image_url
+
+
+def fetch_allegro_offer(url):
+    """Pobiera z publicznej oferty Allegro: cenę, główne zdjęcie i ścieżkę kategorii.
+    Nie korzysta z API Allegro ani z danych logowania sprzedawcy.
+    """
+    url = str(url or '').strip()
+    if not re.match(r'^https?://(?:www\.)?allegro\.pl/', url, flags=re.I):
+        raise ValueError('Wklej bezpośredni link do oferty Allegro (allegro.pl).')
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36',
+        'Accept-Language': 'pl-PL,pl;q=0.9,en;q=0.7',
+    }
+    resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+    resp.raise_for_status()
+    html = resp.text
+    data = {'url': resp.url, 'price': 0.0, 'image': '', 'category': ''}
+
+    # Cena: JSON-LD -> meta/og -> typowe dane w HTML.
+    for obj in _extract_jsonld_objects(html):
+        if not isinstance(obj, dict):
+            continue
+        offers = obj.get('offers')
+        if isinstance(offers, dict):
+            price = offers.get('price')
+            if price:
+                try:
+                    data['price'] = float(str(price).replace(',', '.').replace(' ', ''))
+                    break
+                except Exception:
+                    pass
+        image = obj.get('image')
+        if not data['image'] and isinstance(image, str):
+            data['image'] = image
+        elif not data['image'] and isinstance(image, list) and image:
+            data['image'] = str(image[0])
+
+    def meta_content(patterns):
+        for pat in patterns:
+            m = re.search(pat, html, flags=re.I|re.S)
+            if m:
+                return re.sub(r'&(?:amp|quot|apos|lt|gt);', lambda x: {'&amp;':'&','&quot;':'"','&apos;':"'",'&lt;':'<','&gt;':'>'}[x.group(0)], m.group(1).strip())
+        return ''
+
+    if not data['image']:
+        data['image'] = meta_content([
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        ])
+
+    if not data['price']:
+        raw = meta_content([
+            r'<meta[^>]+property=["\']product:price:amount["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+itemprop=["\']price["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+name=["\']price["\'][^>]+content=["\']([^"\']+)',
+        ])
+        if raw:
+            try: data['price'] = float(raw.replace(',', '.').replace(' ', ''))
+            except Exception: pass
+
+    # Kategoria: najpierw JSON-LD BreadcrumbList, potem dane w HTML.
+    breadcrumbs = []
+    for obj in _extract_jsonld_objects(html):
+        if not isinstance(obj, dict):
+            continue
+        if str(obj.get('@type', '')).lower() == 'breadcrumblist':
+            items = obj.get('itemListElement', [])
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        name = item.get('name') or (item.get('item') or {}).get('name') if isinstance(item.get('item'), dict) else item.get('name')
+                        if name:
+                            breadcrumbs.append(str(name).strip())
+            if breadcrumbs:
+                break
+
+    if not breadcrumbs:
+        # Allegro używa również danych nawigacyjnych w JSON w stronie. Szukamy typowych nazw kategorii.
+        for m in re.finditer(r'"name"\s*:\s*"([^"]{2,80})"\s*,\s*"url"\s*:\s*"https://allegro\.pl/kategoria/', html):
+            name = m.group(1).strip()
+            if name and name not in breadcrumbs:
+                breadcrumbs.append(name)
+        if breadcrumbs:
+            breadcrumbs = breadcrumbs[-6:]
+
+    data['category'] = ' › '.join(breadcrumbs)
+    if data.get('image'):
+        data['image'] = download_allegro_image(data['image'])
+    if not data['price'] and not data['image'] and not data['category']:
+        raise RuntimeError('Nie udało się odczytać danych z tej strony Allegro. Oferta może być niedostępna albo Allegro zmieniło strukturę strony.')
+    return data
+
+
+def sync_allegro_offer(conn, product_id, url, fallback_thumb=''):
+    """Pobiera dane oferty Allegro i zapisuje je przy produkcie."""
+    info = fetch_allegro_offer(url)
+    with conn.session as s:
+        s.execute(text("""UPDATE products SET
+            allegro_link=:url,
+            allegro_price=:price,
+            allegro_image=:image,
+            allegro_category=:category,
+            sale_status='Wystawiony',
+            listed_at=COALESCE(listed_at, NOW()),
+            updated_at=NOW()
+            WHERE id=:id"""), {
+                'id': int(product_id), 'url': info['url'], 'price': float(info['price'] or 0),
+                'image': str(info['image'] or ''), 'category': str(info['category'] or '')
+            })
+        s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {'id': int(product_id)})
+        s.commit()
+    invalidate_data_cache()
+    return info
+
 def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
     row = {
         "position": 1,
@@ -251,9 +407,9 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         row["position"] = int(max_position)
         result = s.execute(text("""
             INSERT INTO products (pallet_id, position, quantity, category, brand, product, model, state, completeness,
-                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority, image_thumb, sale_status)
+                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, allegro_price, allegro_image, allegro_category, notes, priority, image_thumb, sale_status)
             VALUES (:pallet_id,:position,:quantity,:category,:brand,:product,:model,:state,:completeness,
-                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,:notes,:priority,:image_thumb,:sale_status)
+                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,0,'','',:notes,:priority,:image_thumb,:sale_status)
             RETURNING id
         """), {"pallet_id":int(pallet_id), **row})
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=:id"), {"id":int(pallet_id)})
@@ -293,27 +449,18 @@ def update_product_thumbnail(conn, product_id, image_thumb, replace=False):
     invalidate_data_cache()
 
 
-def update_sale_status(conn, product_id, status, sold_price=0, commission=0):
-    """Zmienia status sprzedaży produktu i zapisuje cenę, prowizję oraz kwotę po prowizji."""
+def update_sale_status(conn, product_id, status, sold_price=0):
+    """Zmienia status sprzedaży produktu i zapisuje cenę sprzedaży."""
     allowed = {"Na stanie", "Wystawiony", "Sprzedany"}
     status = status if status in allowed else "Na stanie"
-    sold_price = max(0.0, float(sold_price or 0))
-    commission = max(0.0, float(commission or 0))
-    net_sale_price = max(0.0, sold_price - commission) if status == "Sprzedany" else 0.0
     with conn.session as s:
-        params = {
-            "id": int(product_id),
-            "status": status,
-            "sold_price": sold_price,
-            "commission": commission,
-            "net_sale_price": net_sale_price,
-        }
+        params = {"id": int(product_id), "status": status, "sold_price": float(sold_price or 0)}
         if status == "Wystawiony":
-            sql = """UPDATE products SET sale_status=:status, sold_price=0, commission=0, net_sale_price=0, listed_at=COALESCE(listed_at, NOW()), sold_at=NULL, updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, sold_price=0, listed_at=COALESCE(listed_at, NOW()), sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         elif status == "Sprzedany":
-            sql = """UPDATE products SET sale_status=:status, sold_price=:sold_price, commission=:commission, net_sale_price=:net_sale_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, sold_price=:sold_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
         else:
-            sql = """UPDATE products SET sale_status=:status, sold_price=0, commission=0, net_sale_price=0, sold_at=NULL, updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, sold_price=0, sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         s.execute(text(sql), params)
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {"id": int(product_id)})
         s.commit()
@@ -403,13 +550,9 @@ def make_excel(products, pallet_name, cost):
     for c in ws[1]: c.font=Font(bold=True); c.fill=fill; c.alignment=Alignment(horizontal="center")
     for row in products: ws.append([row.get(f,"") for f in FIELDS])
     ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
-    for i,w in enumerate([7,9,22,18,30,18,22,25,16,18,24,18,25,45,45,28,18,18,18,22,20,20],1): ws.column_dimensions[__import__('openpyxl').utils.get_column_letter(i)].width=w
+    for i,w in enumerate([7,9,22,18,30,18,22,25,16,18,24,18,25,40,40,18,35,45,28,18,18,20,20],1): ws.column_dimensions[__import__('openpyxl').utils.get_column_letter(i)].width=w
     s=wb.create_sheet("Podsumowanie"); s["A1"]="PODSUMOWANIE PALETY"; s["A1"].font=Font(bold=True,size=16)
-    sold_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Sprzedany"]
-    gross_sales = sum(float(r.get("Cena sprzedaży", 0) or 0) for r in sold_rows)
-    commissions = sum(float(r.get("Prowizja", 0) or 0) for r in sold_rows)
-    net_sales = sum(float(r.get("Finalna wartość sprzedaży", max(0, float(r.get("Cena sprzedaży", 0) or 0) - float(r.get("Prowizja", 0) or 0))) or 0) for r in sold_rows)
-    vals=[("Nazwa palety",pallet_name),("Liczba pozycji",len(products)),("Liczba sztuk",sum(int(r['Ilość']) for r in products)),("Koszt palety",cost),("Realna wartość sprzedaży",total_value(products)),("Sprzedaż brutto z oznaczonych jako sprzedane",gross_sales),("Prowizje",commissions),("Finalna wartość sprzedaży po prowizjach",net_sales),("Nadwyżka przed kosztami sprzedaży",total_value(products)-cost)]
+    vals=[("Nazwa palety",pallet_name),("Liczba pozycji",len(products)),("Liczba sztuk",sum(int(r['Ilość']) for r in products)),("Koszt palety",cost),("Realna wartość sprzedaży",total_value(products)),("Nadwyżka przed kosztami sprzedaży",total_value(products)-cost)]
     for i,(a,b) in enumerate(vals,2): s.cell(i,1,a); s.cell(i,2,b)
     s.column_dimensions['A'].width=40; s.column_dimensions['B'].width=25
     out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue()
@@ -419,7 +562,7 @@ def load_public_products(conn):
     """Publiczny katalog: tylko dane potrzebne klientowi."""
     sql = """
     SELECT p.id, p.quantity, p.brand, p.product, p.model,
-           p.real_sale_price, p.image_thumb, p.created_at
+           p.real_sale_price, p.image_thumb, p.allegro_link, p.allegro_price, p.allegro_image, p.allegro_category, p.created_at
     FROM products p
     WHERE p.quantity > 0
       AND p.real_sale_price > 0
@@ -647,14 +790,20 @@ def render_public_catalog(conn):
         cols = st.columns(4)
         for col, r in zip(cols, row):
             with col:
-                thumb = str(r.get("image_thumb") or "")
+                thumb = str(r.get("allegro_image") or r.get("image_thumb") or "")
                 if thumb:
                     st.image(thumb, width="stretch")
                 else:
                     st.markdown('<div style="height:130px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:42px;">📦</div>', unsafe_allow_html=True)
+                category = str(r.get("allegro_category") or "").strip()
+                if category:
+                    st.markdown(f'<div class="public-meta" style="margin-bottom:5px">{escape(category)}</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="public-name">{escape(public_product_name(r))}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="public-price">{r["real_sale_price"]:,.0f} zł</div>', unsafe_allow_html=True)
+                public_price = float(r.get("allegro_price") or 0) or float(r["real_sale_price"] or 0)
+                st.markdown(f'<div class="public-price">{public_price:,.2f} zł</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="public-meta">Dostępne: <b>{r["quantity"]} szt.</b></div>', unsafe_allow_html=True)
+                if str(r.get("allegro_link") or "").strip():
+                    st.link_button("🛒 Oferta na Allegro", str(r["allegro_link"]), use_container_width=True)
                 if st.button("Zapytaj o produkt", key=f"ask_product_{r["id"]}", use_container_width=True, type="secondary"):
                     st.session_state.selected_inquiry_product = int(r["id"])
                     st.rerun()
@@ -848,11 +997,10 @@ if products:
     sold_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Sprzedany"]
     listed_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Wystawiony"]
     available_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") != "Sprzedany"]
-    sm1, sm2, sm3, sm4 = st.columns(4)
+    sm1, sm2, sm3 = st.columns(3)
     with sm1: st.metric("🟢 Wystawione", len(listed_rows))
     with sm2: st.metric("🔴 Sprzedane", len(sold_rows))
-    with sm3: st.metric("💰 Sprzedaż brutto", f"{sum(float(r.get('Cena sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
-    with sm4: st.metric("💵 Po prowizji", f"{sum(float(r.get('Finalna wartość sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
+    with sm3: st.metric("💰 Przychód ze sprzedanych", f"{sum(float(r.get('Cena sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
     # Mobile-first card view: much easier to scan on a phone than a wide dataframe.
     st.markdown("""
     <style>
@@ -883,7 +1031,7 @@ if products:
         level = level_label(float(r["Realna cena sprzedaży"]))
         cls = level_css(level)
         name = " ".join(str(x).strip() for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")] if str(x).strip())
-        thumb = str(r.get("Miniatura") or "")
+        thumb = str(r.get("Zdjęcie Allegro") or r.get("Miniatura") or "")
 
         with st.container(border=True):
             photo_col, details_col = st.columns([1.05, 2.6], vertical_alignment="center")
@@ -931,20 +1079,41 @@ if products:
                 st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
                 st.markdown(f'<div class="product-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>', unsafe_allow_html=True)
                 st.markdown(f'<div class="product-meta">Ilość: <b>{int(r["Ilość"])}</b> · Wartość pozycji: <b>{float(r["Ilość"])*float(r["Realna cena sprzedaży"]):.0f} zł</b></div>', unsafe_allow_html=True)
-                if str(r.get("Link do oferty") or "").strip():
+                if str(r.get("Link do Allegro") or r.get("Link do oferty") or "").strip():
                     try:
-                        st.link_button("🔗 Zobacz ofertę", str(r["Link do oferty"]), use_container_width=True)
+                        st.link_button("🔗 Zobacz ofertę", str(r.get("Link do Allegro") or r.get("Link do oferty")), use_container_width=True)
                     except Exception:
-                        st.markdown(f'[🔗 Zobacz ofertę]({r["Link do oferty"]})')
+                        st.markdown(f'[🔗 Zobacz ofertę]({r.get("Link do Allegro") or r.get("Link do oferty")})')
                 status = str(r.get("Status sprzedaży") or "Na stanie")
                 status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
                 if status == "Sprzedany":
-                    gross = float(r.get("Cena sprzedaży", 0) or 0)
-                    commission = float(r.get("Prowizja", 0) or 0)
-                    net = float(r.get("Finalna wartość sprzedaży", max(0, gross - commission)) or 0)
-                    st.markdown(f"**{status_icon} Sprzedany** · sprzedaż: **{gross:.0f} zł** · prowizja: **{commission:.0f} zł** · po prowizji: **{net:.0f} zł**")
+                    st.markdown(f"**{status_icon} Sprzedany** · cena sprzedaży: **{float(r.get('Cena sprzedaży',0)):.0f} zł**")
                 else:
                     st.markdown(f"**{status_icon} {status}**")
+
+            with st.expander("🛒 Oferta Allegro", expanded=False):
+                st.caption("Wklej link do wystawionej oferty Allegro. Paletownia pobierze z publicznej strony cenę, główne zdjęcie i ścieżkę kategorii.")
+                allegro_url = st.text_input(
+                    "Link do oferty Allegro",
+                    value=str(r.get("Link do Allegro", "") or ""),
+                    key=f"allegro_url_{r['_db_id']}"
+                )
+                if r.get("Cena Allegro"):
+                    st.caption(f"Cena z Allegro: **{float(r['Cena Allegro']):.2f} zł**")
+                if str(r.get("Kategoria Allegro") or "").strip():
+                    st.caption(f"Kategoria: {r['Kategoria Allegro']}")
+                if st.button("🔄 Pobierz z Allegro", key=f"sync_allegro_{r['_db_id']}", use_container_width=True):
+                    try:
+                        info = sync_allegro_offer(conn, r["_db_id"], allegro_url, r.get("Miniatura", ""))
+                        if info.get("image"):
+                            st.success(f"Pobrano dane: {info.get('price') or 0:.2f} zł")
+                        else:
+                            st.success(f"Pobrano dane oferty. Cena: {info.get('price') or 0:.2f} zł")
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Nie udało się pobrać oferty Allegro: {exc}")
+                if str(r.get("Zdjęcie Allegro") or "").strip():
+                    st.image(str(r["Zdjęcie Allegro"]), width=220)
 
             with st.expander("💰 Status sprzedaży", expanded=False):
                 current_status = str(r.get("Status sprzedaży") or "Na stanie")
@@ -958,16 +1127,10 @@ if products:
                         "Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży",0) or 0), step=5.0,
                         key=f"sold_price_{r['_db_id']}"
                     )
-                    commission = st.number_input(
-                        "Prowizja", min_value=0.0, value=float(r.get("Prowizja",0) or 0), step=1.0,
-                        key=f"commission_{r['_db_id']}"
-                    )
-                    st.metric("💵 Finalna wartość sprzedaży", f"{max(0.0, sold_price - commission):.2f} zł")
                 else:
                     sold_price = 0.0
-                    commission = 0.0
                 if st.button("💾 Zapisz status", key=f"save_sale_{r['_db_id']}", use_container_width=True):
-                    update_sale_status(conn, r["_db_id"], new_status, sold_price, commission)
+                    update_sale_status(conn, r["_db_id"], new_status, sold_price)
                     st.success("Status sprzedaży zapisany.")
                     st.rerun()
 
@@ -1028,17 +1191,11 @@ if products:
         st.markdown("**💰 Status sprzedaży**")
         current_status = str(row.get("Status sprzedaży") or "Na stanie")
         manual_status = st.selectbox("Status", ["Na stanie", "Wystawiony", "Sprzedany"], index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0, key=f"manual_sale_status_{row['_db_id']}")
-        if manual_status == "Sprzedany":
-            manual_sold_price = st.number_input("Za ile sprzedano?", min_value=0.0, value=float(row.get("Cena sprzedaży",0) or 0), step=5.0, key=f"manual_sold_price_{row['_db_id']}")
-            manual_commission = st.number_input("Prowizja", min_value=0.0, value=float(row.get("Prowizja",0) or 0), step=1.0, key=f"manual_commission_{row['_db_id']}")
-            st.metric("💵 Finalna wartość sprzedaży", f"{max(0.0, manual_sold_price - manual_commission):.2f} zł")
-        else:
-            manual_sold_price = 0.0
-            manual_commission = 0.0
+        manual_sold_price = st.number_input("Za ile sprzedano?", min_value=0.0, value=float(row.get("Cena sprzedaży",0) or 0), step=5.0, key=f"manual_sold_price_{row['_db_id']}") if manual_status == "Sprzedany" else 0.0
         st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
         if st.button("💾 Zapisz zmiany",use_container_width=True):
             update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer,new_product_name)
-            update_sale_status(conn,row['_db_id'],manual_status,manual_sold_price,manual_commission)
+            update_sale_status(conn,row['_db_id'],manual_status,manual_sold_price)
             st.rerun()
         if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
