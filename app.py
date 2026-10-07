@@ -152,13 +152,25 @@ def db_conn():
 
 
 def db_init(conn):
-    if st.session_state.get("_db_initialized"):
-        return
+    # Inicjalizacja bazowej struktury tylko raz na sesję.
+    if not st.session_state.get("_db_initialized"):
+        with conn.session as s:
+            for statement in [x.strip() for x in DB_DDL.split(';') if x.strip()]:
+                s.execute(text(statement))
+            s.commit()
+        st.session_state["_db_initialized"] = True
+
+    # Migracje wykonujemy również dla już istniejących sesji.
+    # Dzięki IF NOT EXISTS można je bezpiecznie uruchamiać przy każdym starcie.
     with conn.session as s:
-        for statement in [x.strip() for x in DB_DDL.split(';') if x.strip()]:
+        for statement in [
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_l NUMERIC(8,2) NOT NULL DEFAULT 0",
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_w NUMERIC(8,2) NOT NULL DEFAULT 0",
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_h NUMERIC(8,2) NOT NULL DEFAULT 0",
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_weight NUMERIC(8,2) NOT NULL DEFAULT 0",
+        ]:
             s.execute(text(statement))
         s.commit()
-    st.session_state["_db_initialized"] = True
 
 
 def _cache_version():
