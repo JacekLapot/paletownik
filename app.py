@@ -238,6 +238,41 @@ def load_products(conn, pallet_id):
     return rows
 
 
+def load_product_by_id(conn, product_id):
+    """Pobiera jeden produkt bez przeładowywania całej listy."""
+    sql = """
+    SELECT id, position AS "Lp.", quantity AS "Ilość", category AS "Kategoria", brand AS "Marka",
+           product AS "Produkt", model AS "Model", state AS "Stan", completeness AS "Kompletność",
+           new_price AS "Cena nowego", used_price AS "Cena używanego",
+           real_sale_price AS "Realna cena sprzedaży", listing_price AS "Cena wystawienia",
+           price_source AS "Źródło ceny", offer_link AS "Link do oferty", notes AS "Uwagi",
+           priority AS "Priorytet", image_thumb AS "Miniatura",
+           sale_status AS "Status sprzedaży", sold_price AS "Cena sprzedaży",
+           listed_at AS "Data wystawienia", sold_at AS "Data sprzedaży",
+           created_at AS "Data dodania",
+           package_l AS "Długość paczki", package_w AS "Szerokość paczki",
+           package_h AS "Wysokość paczki", package_weight AS "Waga paczki"
+    FROM products
+    WHERE id = :product_id
+    LIMIT 1
+    """
+    df = db_query(conn, sql, {"product_id": int(product_id)}, ttl=0)
+    if df.empty:
+        return None
+    r = df.iloc[0].to_dict()
+    for k in ["Cena nowego", "Cena używanego", "Realna cena sprzedaży", "Cena wystawienia"]:
+        r[k] = float(r.get(k) or 0)
+    r["Priorytet"] = priority_from_price(r["Realna cena sprzedaży"])
+    r["Ilość"] = int(r.get("Ilość") or 1)
+    r["Cena sprzedaży"] = float(r.get("Cena sprzedaży") or 0)
+    r["Status sprzedaży"] = str(r.get("Status sprzedaży") or "Na stanie")
+    for k in ["Długość paczki", "Szerokość paczki", "Wysokość paczki", "Waga paczki"]:
+        r[k] = float(r.get(k) or 0)
+    r["_db_id"] = int(r.pop("id"))
+    r["Lp."] = int(r["Lp."])
+    return r
+
+
 def make_thumbnail_data_url(image_bytes, max_size=1000):
     """Tworzy wysokiej jakości podgląd JPEG do przechowywania w PostgreSQL.
     Obraz jest ograniczany do 1000 px na dłuższym boku, dzięki czemu
@@ -711,10 +746,19 @@ if products:
         if "Mogą poczekać" in label: return "lvl3"
         return "lvl4"
 
-    for r in products:
+    @st.fragment
+    def render_product_card(product_id):
+        r = load_product_by_id(conn, product_id)
+        if r is None:
+            return
+
         level = level_label(float(r["Realna cena sprzedaży"]))
         cls = level_css(level)
-        name = " ".join(str(x).strip() for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")] if str(x).strip())
+        name = " ".join(
+            str(x).strip()
+            for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")]
+            if str(x).strip()
+        )
         thumb = str(r.get("Miniatura") or "")
 
         with st.container(border=True):
@@ -727,109 +771,183 @@ if products:
                         photo = st.file_uploader(
                             "Wybierz nowe zdjęcie",
                             type=["jpg", "jpeg", "png", "webp"],
-                            key=f"card_replace_photo_{r['_db_id']}",
+                            key=f"card_replace_photo_{product_id}",
                             label_visibility="collapsed"
                         )
                         if photo is not None:
-                            try:
-                                new_thumb = make_thumbnail_data_url(photo.getvalue())
-                                if new_thumb:
-                                    update_product_thumbnail(conn, r["_db_id"], new_thumb, replace=True)
-                                    st.success("Zdjęcie zostało zmienione.")
-                                    st.rerun()
-                            except Exception as exc:
-                                st.error(f"Nie udało się zapisać zdjęcia: {exc}")
+                            new_thumb = make_thumbnail_data_url(photo.getvalue())
+                            if new_thumb:
+                                update_product_thumbnail(conn, product_id, new_thumb, replace=True)
+                                st.success("Zdjęcie zostało zmienione.")
+                                st.rerun(scope="fragment")
                 else:
-                    st.markdown('<div style="height:120px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:32px;">📷</div>', unsafe_allow_html=True)
+                    st.markdown(
+                        '<div style="height:120px;display:flex;align-items:center;justify-content:center;'
+                        'border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:32px;">📷</div>',
+                        unsafe_allow_html=True
+                    )
                     with st.popover("➕", help="Dodaj zdjęcie do tego produktu"):
                         st.write(f"**Dodaj zdjęcie:** {name}")
                         photo = st.file_uploader(
                             "Wybierz zdjęcie",
                             type=["jpg", "jpeg", "png", "webp"],
-                            key=f"card_add_photo_{r['_db_id']}",
+                            key=f"card_add_photo_{product_id}",
                             label_visibility="collapsed"
                         )
                         if photo is not None:
-                            try:
-                                new_thumb = make_thumbnail_data_url(photo.getvalue())
-                                if new_thumb:
-                                    update_product_thumbnail(conn, r["_db_id"], new_thumb, replace=True)
-                                    st.success("Zdjęcie dodane.")
-                                    st.rerun()
-                            except Exception as exc:
-                                st.error(f"Nie udało się zapisać zdjęcia: {exc}")
+                            new_thumb = make_thumbnail_data_url(photo.getvalue())
+                            if new_thumb:
+                                update_product_thumbnail(conn, product_id, new_thumb, replace=True)
+                                st.success("Zdjęcie dodane.")
+                                st.rerun(scope="fragment")
+
             with details_col:
-                st.markdown(f'<div class="product-name">{int(r["Lp."])}. {name}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="product-name">{int(r["Lp."])}. {escape(name)}</div>',
+                    unsafe_allow_html=True
+                )
                 st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
-                st.markdown(f'<div class="product-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="product-meta">Ilość: <b>{int(r["Ilość"])}</b> · Wartość pozycji: <b>{float(r["Ilość"])*float(r["Realna cena sprzedaży"]):.0f} zł</b></div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="product-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>',
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    f'<div class="product-meta">Ilość: <b>{int(r["Ilość"])}</b> · '
+                    f'Wartość pozycji: <b>{float(r["Ilość"])*float(r["Realna cena sprzedaży"]):.0f} zł</b></div>',
+                    unsafe_allow_html=True
+                )
                 if str(r.get("Link do oferty") or "").strip():
                     try:
                         st.link_button("🔗 Zobacz ofertę", str(r["Link do oferty"]), use_container_width=True)
                     except Exception:
                         st.markdown(f'[🔗 Zobacz ofertę]({r["Link do oferty"]})')
+
                 status = str(r.get("Status sprzedaży") or "Na stanie")
                 status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
                 if status == "Sprzedany":
-                    st.markdown(f"**{status_icon} Sprzedany** · cena sprzedaży: **{float(r.get('Cena sprzedaży',0)):.0f} zł**")
+                    st.markdown(
+                        f"**{status_icon} Sprzedany** · cena sprzedaży: "
+                        f"**{float(r.get('Cena sprzedaży',0)):.0f} zł**"
+                    )
                 else:
                     st.markdown(f"**{status_icon} {status}**")
 
-            with st.expander("💰 Status sprzedaży", expanded=False):
-                current_status = str(r.get("Status sprzedaży") or "Na stanie")
-                new_status = st.selectbox(
-                    "Status", ["Na stanie", "Wystawiony", "Sprzedany"],
-                    index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
-                    key=f"sale_status_{r['_db_id']}"
-                )
-                if new_status == "Sprzedany":
-                    sold_price = st.number_input(
-                        "Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży",0) or 0), step=5.0,
-                        key=f"sold_price_{r['_db_id']}"
-                    )
-                else:
-                    sold_price = 0.0
-                if st.button("💾 Zapisz status", key=f"save_sale_{r['_db_id']}", use_container_width=True):
-                    update_sale_status(conn, r["_db_id"], new_status, sold_price)
-                    st.success("Status sprzedaży zapisany.")
-                    st.rerun()
-
-            with st.expander("🛠️ Edycja produktu", expanded=False):
+            with st.form(key=f"product_edit_form_{product_id}", clear_on_submit=False):
+                st.markdown("**🛠️ Edycja produktu**")
                 new_product_name = st.text_input(
                     "Nazwa produktu",
                     value=str(r.get("Produkt", "") or ""),
-                    key=f"card_edit_product_{r['_db_id']}"
+                    key=f"card_edit_product_{product_id}"
                 )
-                e1, e2 = st.columns(2)
+
+                e1, e2, e3, e4 = st.columns(4)
                 with e1:
-                    new_qty = st.number_input("Ilość", min_value=1, value=int(r["Ilość"]), step=1, key=f"card_edit_qty_{r['_db_id']}")
+                    new_qty = st.number_input(
+                        "Ilość", min_value=1, value=int(r["Ilość"]), step=1,
+                        key=f"card_edit_qty_{product_id}"
+                    )
                 with e2:
-                    new_real = st.number_input("Realna sprzedaż / szt.", min_value=0.0, value=float(r["Realna cena sprzedaży"]), step=5.0, key=f"card_edit_real_{r['_db_id']}")
-                e3, e4 = st.columns(2)
+                    new_real = st.number_input(
+                        "Realna sprzedaż / szt.", min_value=0.0,
+                        value=float(r["Realna cena sprzedaży"]), step=5.0,
+                        key=f"card_edit_real_{product_id}"
+                    )
                 with e3:
-                    new_listing = st.number_input("Cena wystawienia", min_value=0.0, value=float(r["Cena wystawienia"]), step=5.0, key=f"card_edit_listing_{r['_db_id']}")
+                    new_listing = st.number_input(
+                        "Cena wystawienia", min_value=0.0,
+                        value=float(r["Cena wystawienia"]), step=5.0,
+                        key=f"card_edit_listing_{product_id}"
+                    )
                 with e4:
                     st.metric("Poziom", level_label(new_real))
+
                 st.markdown("**📦 Wymiary paczki / wysyłka**")
                 p1, p2, p3, p4 = st.columns(4)
-                with p1: pkg_l = st.number_input("Długość (cm)", min_value=0.0, value=float(r.get("Długość paczki",0)), step=0.5, key=f"pkg_l_{r['_db_id']}")
-                with p2: pkg_w = st.number_input("Szerokość (cm)", min_value=0.0, value=float(r.get("Szerokość paczki",0)), step=0.5, key=f"pkg_w_{r['_db_id']}")
-                with p3: pkg_h = st.number_input("Wysokość (cm)", min_value=0.0, value=float(r.get("Wysokość paczki",0)), step=0.5, key=f"pkg_h_{r['_db_id']}")
-                with p4: pkg_weight = st.number_input("Waga (kg)", min_value=0.0, value=float(r.get("Waga paczki",0)), step=0.1, key=f"pkg_weight_{r['_db_id']}")
+                with p1:
+                    pkg_l = st.number_input(
+                        "Długość (cm)", min_value=0.0,
+                        value=float(r.get("Długość paczki", 0)), step=0.5,
+                        key=f"pkg_l_{product_id}"
+                    )
+                with p2:
+                    pkg_w = st.number_input(
+                        "Szerokość (cm)", min_value=0.0,
+                        value=float(r.get("Szerokość paczki", 0)), step=0.5,
+                        key=f"pkg_w_{product_id}"
+                    )
+                with p3:
+                    pkg_h = st.number_input(
+                        "Wysokość (cm)", min_value=0.0,
+                        value=float(r.get("Wysokość paczki", 0)), step=0.5,
+                        key=f"pkg_h_{product_id}"
+                    )
+                with p4:
+                    pkg_weight = st.number_input(
+                        "Waga (kg)", min_value=0.0,
+                        value=float(r.get("Waga paczki", 0)), step=0.1,
+                        key=f"pkg_weight_{product_id}"
+                    )
+
                 if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
                     pdims, pops = best_shipping_options(pkg_l, pkg_w, pkg_h, pkg_weight)
-                    st.caption(f"📐 Karton z wypełnieniem (+2 cm na każdy bok): **{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**")
-                    st.caption(" • ".join(f"{k}: **{v or 'poza automatem'}**" for k,v in pops.items()))
-                new_offer = st.text_input("Link do przykładowej oferty", value=str(r.get("Link do oferty", "") or ""), key=f"card_edit_offer_{r['_db_id']}")
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("💾 Zapisz zmiany", key=f"card_save_{r['_db_id']}", use_container_width=True):
-                        update_product(conn, r["_db_id"], new_qty, new_real, new_listing, None, new_offer, new_product_name, pkg_l, pkg_w, pkg_h, pkg_weight)
-                        st.rerun()
-                with b2:
-                    if st.button("🗑️ Usuń produkt", key=f"card_delete_{r['_db_id']}", use_container_width=True):
-                        delete_product(conn, r["_db_id"])
-                        st.rerun()
+                    st.caption(
+                        f"📐 Karton z wypełnieniem (+2 cm na każdy bok): "
+                        f"**{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**"
+                    )
+                    st.caption(
+                        " • ".join(f"{k}: **{v or 'poza automatem'}**" for k, v in pops.items())
+                    )
+
+                new_offer = st.text_input(
+                    "Link do przykładowej oferty",
+                    value=str(r.get("Link do oferty", "") or ""),
+                    key=f"card_edit_offer_{product_id}"
+                )
+
+                st.markdown("**💰 Status sprzedaży**")
+                current_status = str(r.get("Status sprzedaży") or "Na stanie")
+                manual_status = st.selectbox(
+                    "Status",
+                    ["Na stanie", "Wystawiony", "Sprzedany"],
+                    index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status)
+                    if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
+                    key=f"manual_sale_status_{product_id}"
+                )
+                manual_sold_price = (
+                    st.number_input(
+                        "Za ile sprzedano?", min_value=0.0,
+                        value=float(r.get("Cena sprzedaży", 0) or 0), step=5.0,
+                        key=f"manual_sold_price_{product_id}"
+                    )
+                    if manual_status == "Sprzedany" else 0.0
+                )
+
+                save_clicked = st.form_submit_button(
+                    "💾 Zapisz zmiany",
+                    use_container_width=True,
+                    type="primary"
+                )
+
+            if save_clicked:
+                update_product(
+                    conn, product_id, new_qty, new_real, new_listing,
+                    None, new_offer, new_product_name,
+                    pkg_l, pkg_w, pkg_h, pkg_weight
+                )
+                update_sale_status(conn, product_id, manual_status, manual_sold_price)
+                st.success("✅ Zapisano zmiany.")
+                st.rerun(scope="fragment")
+
+            if st.button(
+                "🗑️ Usuń produkt",
+                key=f"card_delete_{product_id}",
+                use_container_width=True
+            ):
+                delete_product(conn, product_id)
+                st.rerun()
+
+    for r in products:
+        render_product_card(r["_db_id"])
 
     st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
 
@@ -848,36 +966,6 @@ if products:
             with info_col:
                 st.caption(f"Realna sprzedaż: {float(r['Realna cena sprzedaży']):.0f} zł • Ilość: {int(r['Ilość'])}")
 
-    with st.expander("🛠️ Ręczna edycja", expanded=False):
-        options=[f"{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}" for r in products]
-        selected_product=st.selectbox("Wybierz produkt",options); idx=options.index(selected_product); row=products[idx]
-        new_product_name=st.text_input("Nazwa produktu",value=str(row.get("Produkt","") or ""),key=f"edit_product_{row['_db_id']}")
-        e1,e2,e3,e4=st.columns(4)
-        with e1: new_qty=st.number_input("Ilość",min_value=1,value=int(row['Ilość']),step=1,key=f"edit_qty_{row['_db_id']}")
-        with e2: new_real=st.number_input("Realna sprzedaż / szt.",min_value=0.0,value=float(row['Realna cena sprzedaży']),step=5.0,key=f"edit_real_{row['_db_id']}")
-        with e3: new_listing=st.number_input("Cena wystawienia",min_value=0.0,value=float(row['Cena wystawienia']),step=5.0,key=f"edit_listing_{row['_db_id']}")
-        with e4: st.metric("Poziom", level_label(new_real))
-        st.markdown("**📦 Wymiary paczki / wysyłka**")
-        p1,p2,p3,p4=st.columns(4)
-        with p1: pkg_l=st.number_input("Długość (cm)",min_value=0.0,value=float(row.get("Długość paczki",0)),step=0.5,key=f"manual_pkg_l_{row['_db_id']}")
-        with p2: pkg_w=st.number_input("Szerokość (cm)",min_value=0.0,value=float(row.get("Szerokość paczki",0)),step=0.5,key=f"manual_pkg_w_{row['_db_id']}")
-        with p3: pkg_h=st.number_input("Wysokość (cm)",min_value=0.0,value=float(row.get("Wysokość paczki",0)),step=0.5,key=f"manual_pkg_h_{row['_db_id']}")
-        with p4: pkg_weight=st.number_input("Waga (kg)",min_value=0.0,value=float(row.get("Waga paczki",0)),step=0.1,key=f"manual_pkg_weight_{row['_db_id']}")
-        if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
-            pdims,pops=best_shipping_options(pkg_l,pkg_w,pkg_h,pkg_weight)
-            st.caption(f"📐 Karton z wypełnieniem (+2 cm na każdy bok): **{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**")
-            st.caption(" • ".join(f"{k}: **{v or 'poza automatem'}**" for k,v in pops.items()))
-        new_offer=st.text_input("Link do przykładowej oferty",value=str(row.get("Link do oferty","") or ""),key=f"edit_offer_{row['_db_id']}")
-        st.markdown("**💰 Status sprzedaży**")
-        current_status = str(row.get("Status sprzedaży") or "Na stanie")
-        manual_status = st.selectbox("Status", ["Na stanie", "Wystawiony", "Sprzedany"], index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0, key=f"manual_sale_status_{row['_db_id']}")
-        manual_sold_price = st.number_input("Za ile sprzedano?", min_value=0.0, value=float(row.get("Cena sprzedaży",0) or 0), step=5.0, key=f"manual_sold_price_{row['_db_id']}") if manual_status == "Sprzedany" else 0.0
-        st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
-        if st.button("💾 Zapisz zmiany",use_container_width=True):
-            update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer,new_product_name,pkg_l,pkg_w,pkg_h,pkg_weight)
-            update_sale_status(conn,row['_db_id'],manual_status,manual_sold_price)
-            st.rerun()
-        if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
 
 if products:
