@@ -524,6 +524,7 @@ if "pending" not in st.session_state: st.session_state.pending=None
 if "last_analyzed_hash" not in st.session_state: st.session_state.last_analyzed_hash=None
 if "last_added" not in st.session_state: st.session_state.last_added=None
 if "admin_logged_in" not in st.session_state: st.session_state.admin_logged_in = False
+if "products_page" not in st.session_state: st.session_state.products_page = 1
 
 # Paletownia jest wyłącznie panelem administracyjnym.
 # Po wejściu na stronę użytkownik od razu dostaje ekran PIN-u.
@@ -746,6 +747,35 @@ if products:
         if "Mogą poczekać" in label: return "lvl3"
         return "lvl4"
 
+    # Kompaktowy widok: karty w siatce + paginacja. Szczegóły edycji są zwinięte.
+    st.markdown("""
+    <style>
+    .product-card-compact {
+        border:1px solid #e5e7eb; border-radius:14px; padding:10px;
+        margin:5px 0 10px 0; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.05);
+        min-height:250px;
+    }
+    .compact-name { font-size:.96rem; font-weight:750; line-height:1.2; min-height:42px; }
+    .compact-price { font-size:1.12rem; font-weight:800; margin:3px 0; }
+    .compact-meta { color:#6b7280; font-size:.78rem; line-height:1.3; }
+    .level-badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:.72rem; font-weight:700; margin:2px 0; }
+    .lvl1 { background:#fff1bf; color:#6b5200; }
+    .lvl2 { background:#dcfce7; color:#166534; }
+    .lvl3 { background:#ffedd5; color:#9a3412; }
+    .lvl4 { background:#fee2e2; color:#991b1b; }
+    @media (max-width: 900px) {
+      .compact-name { font-size:.9rem; }
+      .product-card-compact { min-height:235px; }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    def level_css(label):
+        if "Priorytet" in label: return "lvl1"
+        if "Ważne" in label: return "lvl2"
+        if "Mogą poczekać" in label: return "lvl3"
+        return "lvl4"
+
     @st.fragment
     def render_product_card(product_id):
         r = load_product_by_id(conn, product_id)
@@ -760,194 +790,140 @@ if products:
             if str(x).strip()
         )
         thumb = str(r.get("Miniatura") or "")
+        status = str(r.get("Status sprzedaży") or "Na stanie")
+        status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
 
         with st.container(border=True):
-            photo_col, details_col = st.columns([1.05, 2.6], vertical_alignment="center")
-            with photo_col:
-                if thumb:
-                    st.image(thumb, width="stretch")
-                    with st.popover("🖼️ Zmień zdjęcie", help="Zmień zdjęcie przypisane do tej oferty"):
-                        st.write(f"**Zmień zdjęcie:** {name}")
-                        photo = st.file_uploader(
-                            "Wybierz nowe zdjęcie",
-                            type=["jpg", "jpeg", "png", "webp"],
-                            key=f"card_replace_photo_{product_id}",
-                            label_visibility="collapsed"
-                        )
-                        if photo is not None:
-                            new_thumb = make_thumbnail_data_url(photo.getvalue())
-                            if new_thumb:
-                                update_product_thumbnail(conn, product_id, new_thumb, replace=True)
-                                st.success("Zdjęcie zostało zmienione.")
-                                st.rerun(scope="fragment")
-                else:
-                    st.markdown(
-                        '<div style="height:120px;display:flex;align-items:center;justify-content:center;'
-                        'border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:32px;">📷</div>',
-                        unsafe_allow_html=True
-                    )
-                    with st.popover("➕", help="Dodaj zdjęcie do tego produktu"):
-                        st.write(f"**Dodaj zdjęcie:** {name}")
-                        photo = st.file_uploader(
-                            "Wybierz zdjęcie",
-                            type=["jpg", "jpeg", "png", "webp"],
-                            key=f"card_add_photo_{product_id}",
-                            label_visibility="collapsed"
-                        )
-                        if photo is not None:
-                            new_thumb = make_thumbnail_data_url(photo.getvalue())
-                            if new_thumb:
-                                update_product_thumbnail(conn, product_id, new_thumb, replace=True)
-                                st.success("Zdjęcie dodane.")
-                                st.rerun(scope="fragment")
-
-            with details_col:
+            if thumb:
+                st.image(thumb, width="stretch")
+            else:
                 st.markdown(
-                    f'<div class="product-name">{int(r["Lp."])}. {escape(name)}</div>',
+                    '<div style="height:125px;display:flex;align-items:center;justify-content:center;'
+                    'border:1px dashed #cbd5e1;border-radius:10px;color:#94a3b8;font-size:30px;">📷</div>',
                     unsafe_allow_html=True
                 )
-                st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="product-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>',
-                    unsafe_allow_html=True
+
+            st.markdown(f'<div class="compact-name">{int(r["Lp."])}. {escape(name)}</div>', unsafe_allow_html=True)
+            st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
+            st.markdown(f'<div class="compact-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="compact-meta">Ilość: <b>{int(r["Ilość"])}</b> · {status_icon} {escape(status)}</div>',
+                unsafe_allow_html=True
+            )
+            if status == "Sprzedany":
+                st.caption(f'Sprzedano za {float(r.get("Cena sprzedaży",0) or 0):.0f} zł')
+
+            if str(r.get("Link do oferty") or "").strip():
+                try:
+                    st.link_button("🔗 Oferta", str(r["Link do oferty"]), use_container_width=True)
+                except Exception:
+                    st.markdown(f'[🔗 Oferta]({r["Link do oferty"]})')
+
+            with st.expander("✏️ Edytuj", expanded=False):
+                with st.form(key=f"product_edit_form_{product_id}", clear_on_submit=False):
+                    new_product_name = st.text_input(
+                        "Nazwa produktu", value=str(r.get("Produkt", "") or ""),
+                        key=f"card_edit_product_{product_id}"
+                    )
+                    e1, e2 = st.columns(2)
+                    with e1:
+                        new_qty = st.number_input("Ilość", min_value=1, value=int(r["Ilość"]), step=1, key=f"card_edit_qty_{product_id}")
+                    with e2:
+                        new_real = st.number_input("Realna sprzedaż / szt.", min_value=0.0, value=float(r["Realna cena sprzedaży"]), step=5.0, key=f"card_edit_real_{product_id}")
+                    new_listing = st.number_input("Cena wystawienia", min_value=0.0, value=float(r["Cena wystawienia"]), step=5.0, key=f"card_edit_listing_{product_id}")
+
+                    st.markdown("**📦 Wymiary paczki / wysyłka**")
+                    p1, p2 = st.columns(2)
+                    with p1:
+                        pkg_l = st.number_input("Długość (cm)", min_value=0.0, value=float(r.get("Długość paczki", 0)), step=0.5, key=f"pkg_l_{product_id}")
+                        pkg_h = st.number_input("Wysokość (cm)", min_value=0.0, value=float(r.get("Wysokość paczki", 0)), step=0.5, key=f"pkg_h_{product_id}")
+                    with p2:
+                        pkg_w = st.number_input("Szerokość (cm)", min_value=0.0, value=float(r.get("Szerokość paczki", 0)), step=0.5, key=f"pkg_w_{product_id}")
+                        pkg_weight = st.number_input("Waga (kg)", min_value=0.0, value=float(r.get("Waga paczki", 0)), step=0.1, key=f"pkg_weight_{product_id}")
+
+                    if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
+                        pdims, pops = best_shipping_options(pkg_l, pkg_w, pkg_h, pkg_weight)
+                        st.caption(f"📐 Po dodaniu +2 cm: **{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**")
+                        st.caption(" • ".join(f"{k}: **{v or 'poza automatem'}**" for k, v in pops.items()))
+
+                    new_offer = st.text_input(
+                        "Link do przykładowej oferty", value=str(r.get("Link do oferty", "") or ""),
+                        key=f"card_edit_offer_{product_id}"
+                    )
+                    current_status = str(r.get("Status sprzedaży") or "Na stanie")
+                    manual_status = st.selectbox(
+                        "Status", ["Na stanie", "Wystawiony", "Sprzedany"],
+                        index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
+                        key=f"manual_sale_status_{product_id}"
+                    )
+                    manual_sold_price = (
+                        st.number_input("Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży", 0) or 0), step=5.0, key=f"manual_sold_price_{product_id}")
+                        if manual_status == "Sprzedany" else 0.0
+                    )
+                    save_clicked = st.form_submit_button("💾 Zapisz zmiany", use_container_width=True, type="primary")
+
+                if save_clicked:
+                    update_product(conn, product_id, new_qty, new_real, new_listing, None, new_offer, new_product_name, pkg_l, pkg_w, pkg_h, pkg_weight)
+                    update_sale_status(conn, product_id, manual_status, manual_sold_price)
+                    st.success("✅ Zapisano zmiany.")
+                    st.rerun(scope="fragment")
+
+            with st.popover("🖼️ Zdjęcie", use_container_width=True):
+                st.write(f"**{name}**")
+                photo = st.file_uploader(
+                    "Wybierz nowe zdjęcie", type=["jpg", "jpeg", "png", "webp"],
+                    key=f"card_photo_{product_id}", label_visibility="collapsed"
                 )
-                st.markdown(
-                    f'<div class="product-meta">Ilość: <b>{int(r["Ilość"])}</b> · '
-                    f'Wartość pozycji: <b>{float(r["Ilość"])*float(r["Realna cena sprzedaży"]):.0f} zł</b></div>',
-                    unsafe_allow_html=True
-                )
-                if str(r.get("Link do oferty") or "").strip():
-                    try:
-                        st.link_button("🔗 Zobacz ofertę", str(r["Link do oferty"]), use_container_width=True)
-                    except Exception:
-                        st.markdown(f'[🔗 Zobacz ofertę]({r["Link do oferty"]})')
+                if photo is not None:
+                    new_thumb = make_thumbnail_data_url(photo.getvalue())
+                    if new_thumb:
+                        update_product_thumbnail(conn, product_id, new_thumb, replace=True)
+                        st.success("Zdjęcie zapisane.")
+                        st.rerun(scope="fragment")
 
-                status = str(r.get("Status sprzedaży") or "Na stanie")
-                status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
-                if status == "Sprzedany":
-                    st.markdown(
-                        f"**{status_icon} Sprzedany** · cena sprzedaży: "
-                        f"**{float(r.get('Cena sprzedaży',0)):.0f} zł**"
-                    )
-                else:
-                    st.markdown(f"**{status_icon} {status}**")
-
-            with st.form(key=f"product_edit_form_{product_id}", clear_on_submit=False):
-                st.markdown("**🛠️ Edycja produktu**")
-                new_product_name = st.text_input(
-                    "Nazwa produktu",
-                    value=str(r.get("Produkt", "") or ""),
-                    key=f"card_edit_product_{product_id}"
-                )
-
-                e1, e2, e3, e4 = st.columns(4)
-                with e1:
-                    new_qty = st.number_input(
-                        "Ilość", min_value=1, value=int(r["Ilość"]), step=1,
-                        key=f"card_edit_qty_{product_id}"
-                    )
-                with e2:
-                    new_real = st.number_input(
-                        "Realna sprzedaż / szt.", min_value=0.0,
-                        value=float(r["Realna cena sprzedaży"]), step=5.0,
-                        key=f"card_edit_real_{product_id}"
-                    )
-                with e3:
-                    new_listing = st.number_input(
-                        "Cena wystawienia", min_value=0.0,
-                        value=float(r["Cena wystawienia"]), step=5.0,
-                        key=f"card_edit_listing_{product_id}"
-                    )
-                with e4:
-                    st.metric("Poziom", level_label(new_real))
-
-                st.markdown("**📦 Wymiary paczki / wysyłka**")
-                p1, p2, p3, p4 = st.columns(4)
-                with p1:
-                    pkg_l = st.number_input(
-                        "Długość (cm)", min_value=0.0,
-                        value=float(r.get("Długość paczki", 0)), step=0.5,
-                        key=f"pkg_l_{product_id}"
-                    )
-                with p2:
-                    pkg_w = st.number_input(
-                        "Szerokość (cm)", min_value=0.0,
-                        value=float(r.get("Szerokość paczki", 0)), step=0.5,
-                        key=f"pkg_w_{product_id}"
-                    )
-                with p3:
-                    pkg_h = st.number_input(
-                        "Wysokość (cm)", min_value=0.0,
-                        value=float(r.get("Wysokość paczki", 0)), step=0.5,
-                        key=f"pkg_h_{product_id}"
-                    )
-                with p4:
-                    pkg_weight = st.number_input(
-                        "Waga (kg)", min_value=0.0,
-                        value=float(r.get("Waga paczki", 0)), step=0.1,
-                        key=f"pkg_weight_{product_id}"
-                    )
-
-                if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
-                    pdims, pops = best_shipping_options(pkg_l, pkg_w, pkg_h, pkg_weight)
-                    st.caption(
-                        f"📐 Karton z wypełnieniem (+2 cm na każdy bok): "
-                        f"**{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**"
-                    )
-                    st.caption(
-                        " • ".join(f"{k}: **{v or 'poza automatem'}**" for k, v in pops.items())
-                    )
-
-                new_offer = st.text_input(
-                    "Link do przykładowej oferty",
-                    value=str(r.get("Link do oferty", "") or ""),
-                    key=f"card_edit_offer_{product_id}"
-                )
-
-                st.markdown("**💰 Status sprzedaży**")
-                current_status = str(r.get("Status sprzedaży") or "Na stanie")
-                manual_status = st.selectbox(
-                    "Status",
-                    ["Na stanie", "Wystawiony", "Sprzedany"],
-                    index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status)
-                    if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
-                    key=f"manual_sale_status_{product_id}"
-                )
-                manual_sold_price = (
-                    st.number_input(
-                        "Za ile sprzedano?", min_value=0.0,
-                        value=float(r.get("Cena sprzedaży", 0) or 0), step=5.0,
-                        key=f"manual_sold_price_{product_id}"
-                    )
-                    if manual_status == "Sprzedany" else 0.0
-                )
-
-                save_clicked = st.form_submit_button(
-                    "💾 Zapisz zmiany",
-                    use_container_width=True,
-                    type="primary"
-                )
-
-            if save_clicked:
-                update_product(
-                    conn, product_id, new_qty, new_real, new_listing,
-                    None, new_offer, new_product_name,
-                    pkg_l, pkg_w, pkg_h, pkg_weight
-                )
-                update_sale_status(conn, product_id, manual_status, manual_sold_price)
-                st.success("✅ Zapisano zmiany.")
-                st.rerun(scope="fragment")
-
-            if st.button(
-                "🗑️ Usuń produkt",
-                key=f"card_delete_{product_id}",
-                use_container_width=True
-            ):
+            if st.button("🗑️ Usuń", key=f"card_delete_{product_id}", use_container_width=True):
                 delete_product(conn, product_id)
                 st.rerun()
 
-    for r in products:
-        render_product_card(r["_db_id"])
+    # Paginacja: na jednej stronie maksymalnie 20 produktów.
+    page_size_options = [12, 24, 48]
+    pc1, pc2, pc3 = st.columns([1.3, 1.3, 2.4])
+    with pc1:
+        page_size = st.selectbox("Na stronę", page_size_options, index=1, key="products_page_size")
+    total_products = len(products)
+    total_pages = max(1, (total_products + page_size - 1) // page_size)
+    current_page = min(max(int(st.session_state.get("products_page", 1)), 1), total_pages)
+    with pc2:
+        page_selected = st.number_input("Strona", min_value=1, max_value=total_pages, value=current_page, step=1, key="products_page_input")
+        if int(page_selected) != current_page:
+            st.session_state.products_page = int(page_selected)
+            st.rerun()
+    with pc3:
+        start_idx = (current_page - 1) * page_size
+        end_idx = min(start_idx + page_size, total_products)
+        st.caption(f"Wyświetlam **{start_idx + 1}–{end_idx}** z **{total_products}** produktów")
+
+    page_products = products[start_idx:end_idx]
+    grid_cols = st.columns(4)
+    for idx, r in enumerate(page_products):
+        with grid_cols[idx % 4]:
+            render_product_card(r["_db_id"])
+
+    nav1, nav2, nav3, nav4, nav5 = st.columns([1, 1, 2, 1, 1])
+    with nav1:
+        if st.button("⏮️", disabled=current_page <= 1, key="page_first", use_container_width=True):
+            st.session_state.products_page = 1; st.rerun()
+    with nav2:
+        if st.button("◀️", disabled=current_page <= 1, key="page_prev", use_container_width=True):
+            st.session_state.products_page = current_page - 1; st.rerun()
+    with nav3:
+        st.markdown(f"<div style='text-align:center;padding:8px;font-weight:700;'>Strona {current_page} z {total_pages}</div>", unsafe_allow_html=True)
+    with nav4:
+        if st.button("▶️", disabled=current_page >= total_pages, key="page_next", use_container_width=True):
+            st.session_state.products_page = current_page + 1; st.rerun()
+    with nav5:
+        if st.button("⏭️", disabled=current_page >= total_pages, key="page_last", use_container_width=True):
+            st.session_state.products_page = total_pages; st.rerun()
 
     st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
 
