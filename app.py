@@ -152,25 +152,13 @@ def db_conn():
 
 
 def db_init(conn):
-    # Inicjalizacja bazowej struktury tylko raz na sesję.
-    if not st.session_state.get("_db_initialized"):
-        with conn.session as s:
-            for statement in [x.strip() for x in DB_DDL.split(';') if x.strip()]:
-                s.execute(text(statement))
-            s.commit()
-        st.session_state["_db_initialized"] = True
-
-    # Migracje wykonujemy również dla już istniejących sesji.
-    # Dzięki IF NOT EXISTS można je bezpiecznie uruchamiać przy każdym starcie.
+    if st.session_state.get("_db_initialized"):
+        return
     with conn.session as s:
-        for statement in [
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_l NUMERIC(8,2) NOT NULL DEFAULT 0",
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_w NUMERIC(8,2) NOT NULL DEFAULT 0",
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_h NUMERIC(8,2) NOT NULL DEFAULT 0",
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS package_weight NUMERIC(8,2) NOT NULL DEFAULT 0",
-        ]:
+        for statement in [x.strip() for x in DB_DDL.split(';') if x.strip()]:
             s.execute(text(statement))
         s.commit()
+    st.session_state["_db_initialized"] = True
 
 
 def _cache_version():
@@ -477,253 +465,6 @@ def make_excel(products, pallet_name, cost):
     out=io.BytesIO(); wb.save(out); out.seek(0); return out.getvalue()
 
 
-def load_public_products(conn):
-    """Publiczny katalog: tylko dane potrzebne klientowi."""
-    sql = """
-    SELECT p.id, p.quantity, p.brand, p.product, p.model,
-           p.real_sale_price, p.image_thumb, p.created_at
-    FROM products p
-    WHERE p.quantity > 0
-      AND p.real_sale_price > 0
-      AND COALESCE(p.sale_status, 'Na stanie') <> 'Sprzedany'
-    ORDER BY p.updated_at DESC, p.id DESC
-    """
-    df = db_query(conn, sql)
-    rows = df.to_dict("records")
-    for r in rows:
-        r["id"] = int(r["id"])
-        r["quantity"] = int(r["quantity"] or 0)
-        r["real_sale_price"] = float(r["real_sale_price"] or 0)
-    return rows
-
-
-def public_product_name(r):
-    return " ".join(
-        str(x).strip()
-        for x in [r.get("brand", ""), r.get("product", ""), r.get("model", "")]
-        if str(x).strip()
-    ) or "Produkt"
-
-
-def _secret_value(name, default=""):
-    """Odczytuje sekret z Streamlit Secrets lub środowiska."""
-    try:
-        value = st.secrets.get(name, None)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    except Exception:
-        pass
-
-    value = os.environ.get(name, "")
-    if str(value).strip():
-        return str(value).strip()
-
-    # Dopuszczamy również sekcję [resend] w Secrets, gdyby ktoś tak ją skonfigurował.
-    if name == "RESEND_API_KEY":
-        try:
-            section = st.secrets.get("resend", {})
-            if isinstance(section, dict):
-                value = section.get("api_key", "")
-                if str(value).strip():
-                    return str(value).strip()
-        except Exception:
-            pass
-    return str(default).strip()
-
-
-def send_product_inquiry(product, customer_name, customer_email, customer_phone="", customer_message=""):
-    """Wysyła zapytanie klienta przez Gmail SMTP z użyciem hasła aplikacji Google."""
-    import smtplib
-    from email.message import EmailMessage
-
-    smtp_username = _secret_value("SMTP_USERNAME", "jacek.lapot@gmail.com")
-    smtp_password = _secret_value("SMTP_PASSWORD")
-    recipient = _secret_value("CONTACT_EMAIL", "alfa.alwaysfair@gmail.com")
-    smtp_host = _secret_value("SMTP_HOST", "smtp.gmail.com")
-    smtp_port = int(_secret_value("SMTP_PORT", "587"))
-
-    if not smtp_password:
-        raise RuntimeError(
-            "Brak SMTP_PASSWORD w Streamlit Secrets. Dodaj 16-znakowe hasło aplikacji Google "
-            "dla konta jacek.lapot@gmail.com."
-        )
-
-    product_name = public_product_name(product)
-    price = float(product.get("real_sale_price", 0) or 0)
-    phone_line = customer_phone.strip() if customer_phone else "Nie podano"
-    message_text = customer_message.strip() or "Nie podano"
-
-    msg = EmailMessage()
-    msg["Subject"] = f"Zapytanie o produkt — {product_name}"
-    msg["From"] = smtp_username
-    msg["To"] = recipient
-    msg["Reply-To"] = customer_email.strip()
-    msg.set_content(
-        "Nowe zapytanie z Paletownii\n\n"
-        f"Produkt: {product_name}\n"
-        f"Cena: {price:.2f} zł\n"
-        f"Imię: {customer_name.strip()}\n"
-        f"E-mail: {customer_email.strip()}\n"
-        f"Telefon: {phone_line}\n\n"
-        f"Wiadomość od kupującego:\n{message_text}\n\n"
-        "Wiadomość została wysłana z publicznego katalogu Paletownii."
-    )
-
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(smtp_username, smtp_password)
-            server.send_message(msg)
-    except smtplib.SMTPAuthenticationError as exc:
-        raise RuntimeError(
-            "Gmail odrzucił logowanie. Sprawdź SMTP_USERNAME oraz czy SMTP_PASSWORD "
-            "jest 16-znakowym hasłem aplikacji Google."
-        ) from exc
-    except Exception as exc:
-        raise RuntimeError(f"Gmail SMTP: {exc}") from exc
-
-    return True
-
-
-def render_inquiry_form(product):
-    """Formularz zapytania o konkretny produkt."""
-    st.markdown("### ✉️ Zapytaj o produkt")
-    st.markdown(f"**{escape(public_product_name(product))}** · **{float(product.get('real_sale_price', 0) or 0):,.0f} zł**")
-
-    with st.form("product_inquiry_form", clear_on_submit=True):
-        customer_name = st.text_input("Imię *", placeholder="Np. Jan")
-        customer_email = st.text_input("Adres e-mail *", placeholder="Np. jan@example.com")
-        customer_phone = st.text_input("Telefon (opcjonalnie)", placeholder="Np. 500 600 700")
-        customer_message = st.text_area("Wiadomość", placeholder="Napisz, o co chcesz zapytać…", height=140)
-        submitted = st.form_submit_button("📨 Wyślij zapytanie", type="primary", use_container_width=True)
-
-        if submitted:
-            name_ok = bool(customer_name.strip())
-            email_ok = bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", customer_email.strip()))
-            if not name_ok:
-                st.error("Podaj imię.")
-            elif not email_ok:
-                st.error("Podaj poprawny adres e-mail.")
-            else:
-                try:
-                    send_product_inquiry(product, customer_name, customer_email, customer_phone, customer_message)
-                    st.session_state.inquiry_sent = True
-                except Exception as exc:
-                    st.error(f"Nie udało się wysłać wiadomości. {exc}")
-
-    if st.session_state.get("inquiry_sent"):
-        st.success("✅ Dziękujemy! Zapytanie zostało wysłane. Skontaktujemy się z Tobą.")
-        st.session_state.inquiry_sent = False
-
-    if st.button("← Wróć do katalogu", key="back_to_catalog"):
-        st.session_state.selected_inquiry_product = None
-        st.rerun()
-
-
-def render_public_catalog(conn):
-    """Domyślny, niezalogowany widok katalogu."""
-    public_products = load_public_products(conn)
-
-    st.markdown("""
-    <style>
-    .public-hero {
-        padding: 18px 20px;
-        border-radius: 18px;
-        background: linear-gradient(135deg, #eff6ff 0%, #ffffff 70%);
-        border: 1px solid #dbeafe;
-        margin-bottom: 18px;
-    }
-    .public-card {
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 12px;
-        background: #fff;
-        box-shadow: 0 1px 4px rgba(0,0,0,.05);
-        height: 100%;
-    }
-    .public-name { font-weight: 700; font-size: 1rem; line-height: 1.3; margin-top: 8px; }
-    .public-price { font-size: 1.25rem; font-weight: 800; margin-top: 7px; }
-    .public-meta { color: #6b7280; font-size: .86rem; margin-top: 3px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-    top_left, top_right = st.columns([5, 1])
-    with top_left:
-        st.markdown('<div class="public-hero"><h1 style="margin:0">📦 Paletownia</h1><div style="color:#64748b;margin-top:4px">Produkty dostępne w sprzedaży</div></div>', unsafe_allow_html=True)
-    with top_right:
-        st.write("")
-        st.caption("")
-        with st.popover("🔐 Zaloguj", use_container_width=True):
-            st.markdown("**Panel właściciela**")
-            pin = st.text_input("PIN", type="password", key="admin_pin_input", label_visibility="collapsed", placeholder="Wpisz PIN")
-            if st.button("Zaloguj", type="primary", use_container_width=True, key="public_login"):
-                configured_pin = str(st.secrets.get("ADMIN_PIN", "")).strip()
-                if configured_pin and pin == configured_pin:
-                    st.session_state.admin_logged_in = True
-                    st.session_state.admin_login_error = False
-                    st.rerun()
-                else:
-                    st.session_state.admin_login_error = True
-                    st.error("Nieprawidłowy PIN.")
-
-    if not public_products:
-        st.info("Aktualnie nie ma produktów dostępnych w katalogu.")
-        if not str(st.secrets.get("ADMIN_PIN", "")).strip():
-            st.caption("Panel właściciela nie jest jeszcze skonfigurowany.")
-        return
-
-    total_units = sum(r["quantity"] for r in public_products)
-    c1, c2 = st.columns(2)
-    c1.metric("Dostępne pozycje", len(public_products))
-    c2.metric("Dostępne sztuki", total_units)
-
-    search = st.text_input("🔎 Szukaj produktu", placeholder="np. Tikom, słuchawki, EZVIZ...", key="public_search")
-    sort_public = st.selectbox(
-        "Sortowanie",
-        ["Najnowsze", "Nazwa A–Z", "Cena — od najwyższej", "Cena — od najniższej"],
-        key="public_sort",
-    )
-
-    filtered = public_products
-    q = search.strip().lower()
-    if q:
-        filtered = [r for r in filtered if q in public_product_name(r).lower()]
-
-    if sort_public == "Nazwa A–Z":
-        filtered = sorted(filtered, key=lambda r: public_product_name(r).lower())
-    elif sort_public == "Cena — od najwyższej":
-        filtered = sorted(filtered, key=lambda r: r["real_sale_price"], reverse=True)
-    elif sort_public == "Cena — od najniższej":
-        filtered = sorted(filtered, key=lambda r: r["real_sale_price"])
-
-    st.markdown(f"**Wyniki: {len(filtered)}**")
-    if not filtered:
-        st.info("Nie znaleziono produktu.")
-        return
-
-    # 4 mniejsze karty w jednym wierszu na desktopie.
-    for start in range(0, len(filtered), 4):
-        row = filtered[start:start + 4]
-        cols = st.columns(4)
-        for col, r in zip(cols, row):
-            with col:
-                thumb = str(r.get("image_thumb") or "")
-                if thumb:
-                    st.image(thumb, width="stretch")
-                else:
-                    st.markdown('<div style="height:130px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:12px;color:#94a3b8;font-size:42px;">📦</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="public-name">{escape(public_product_name(r))}</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="public-price">{r["real_sale_price"]:,.0f} zł</div>', unsafe_allow_html=True)
-                st.markdown(f'<div class="public-meta">Dostępne: <b>{r["quantity"]} szt.</b></div>', unsafe_allow_html=True)
-                if st.button("Zapytaj o produkt", key=f"ask_product_{r["id"]}", use_container_width=True, type="secondary"):
-                    st.session_state.selected_inquiry_product = int(r["id"])
-                    st.rerun()
-                st.markdown('<div style="height:12px"></div>', unsafe_allow_html=True)
-
-    st.caption("Ceny dotyczą produktów widocznych jako dostępne w Paletownii.")
-
 # Session/UI state only stores current selection and temporary AI result. Actual data is in PostgreSQL.
 if "_data_version" not in st.session_state: st.session_state._data_version = 0
 if "_db_initialized" not in st.session_state: st.session_state._db_initialized = False
@@ -731,6 +472,41 @@ if "current_pallet_id" not in st.session_state: st.session_state.current_pallet_
 if "pending" not in st.session_state: st.session_state.pending=None
 if "last_analyzed_hash" not in st.session_state: st.session_state.last_analyzed_hash=None
 if "last_added" not in st.session_state: st.session_state.last_added=None
+if "admin_logged_in" not in st.session_state: st.session_state.admin_logged_in = False
+
+# Paletownia jest wyłącznie panelem administracyjnym.
+# Po wejściu na stronę użytkownik od razu dostaje ekran PIN-u.
+if not st.session_state.admin_logged_in:
+    st.markdown("""
+    <style>
+    .login-wrap {
+        max-width: 430px;
+        margin: 12vh auto 0 auto;
+        text-align: center;
+    }
+    .login-title { font-size: 2rem; font-weight: 800; margin-bottom: 4px; }
+    .login-subtitle { color: #64748b; margin-bottom: 24px; }
+    </style>
+    <div class="login-wrap">
+        <div class="login-title">📦 Paletownia</div>
+        <div class="login-subtitle">Panel administracyjny</div>
+    </div>
+    """, unsafe_allow_html=True)
+    with st.form("admin_login_form"):
+        pin = st.text_input("PIN administratora", type="password", placeholder="Wpisz PIN", label_visibility="collapsed")
+        submitted = st.form_submit_button("🔐 Zaloguj", type="primary", use_container_width=True)
+        if submitted:
+            configured_pin = str(st.secrets.get("ADMIN_PIN", "")).strip()
+            if configured_pin and pin == configured_pin:
+                st.session_state.admin_logged_in = True
+                st.session_state.admin_login_error = False
+                st.rerun()
+            else:
+                st.session_state.admin_login_error = True
+                st.error("Nieprawidłowy PIN.")
+    if not str(st.secrets.get("ADMIN_PIN", "")).strip():
+        st.warning("Brak ADMIN_PIN w Secrets Streamlit.")
+    st.stop()
 
 conn=db_conn()
 if conn:
@@ -741,27 +517,6 @@ if conn:
     except Exception as exc:
         st.error("Nie udało się zainicjalizować bazy danych.")
         st.code(str(exc)); st.stop()
-
-# Domyślnie każdy użytkownik trafia do katalogu publicznego.
-if "admin_logged_in" not in st.session_state:
-    st.session_state.admin_logged_in = False
-if "selected_inquiry_product" not in st.session_state:
-    st.session_state.selected_inquiry_product = None
-if "inquiry_sent" not in st.session_state:
-    st.session_state.inquiry_sent = False
-
-if not st.session_state.admin_logged_in:
-    if st.session_state.selected_inquiry_product is not None:
-        public_products_for_form = load_public_products(conn)
-        selected_product = next((r for r in public_products_for_form if r["id"] == int(st.session_state.selected_inquiry_product)), None)
-        if selected_product is None:
-            st.session_state.selected_inquiry_product = None
-            st.rerun()
-        else:
-            render_inquiry_form(selected_product)
-    else:
-        render_public_catalog(conn)
-    st.stop()
 
 # Tryb administratora — pełny dotychczasowy interfejs.
 admin_left, admin_right = st.columns([5, 1])
