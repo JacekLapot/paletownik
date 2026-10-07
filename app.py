@@ -4,10 +4,12 @@ import re
 import hashlib
 import os
 from html import escape
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import hmac
 
 import pandas as pd
 import streamlit as st
+import extra_streamlit_components as stx
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openai import OpenAI
@@ -501,6 +503,54 @@ def excel_safe_value(value):
     return value
 
 
+@st.cache_resource
+def get_cookie_manager():
+    return stx.CookieManager()
+
+
+def admin_session_token():
+    """Stały, nieodwracalny token dla przeglądarki administratora."""
+    secret = str(st.secrets.get("ADMIN_SESSION_SECRET", "")).strip()
+    if not secret:
+        # Fallback: działa bez dodatkowego wpisu w Secrets, ale docelowo
+        # warto ustawić osobny, długi ADMIN_SESSION_SECRET.
+        secret = str(st.secrets.get("ADMIN_PIN", "")).strip()
+    if not secret:
+        return ""
+    return hmac.new(secret.encode("utf-8"), b"paletownia-admin-v1", hashlib.sha256).hexdigest()
+
+
+def persistent_admin_login():
+    """Odtwarza logowanie z trwałego cookie przeglądarki."""
+    try:
+        manager = get_cookie_manager()
+        token = manager.get(cookie="paletownia_admin")
+        expected = admin_session_token()
+        if token and expected and hmac.compare_digest(str(token), expected):
+            st.session_state.admin_logged_in = True
+    except Exception:
+        # Brak/awaria komponentu cookie nie blokuje zwykłego logowania PIN-em.
+        pass
+
+
+def persist_admin_login():
+    manager = get_cookie_manager()
+    token = admin_session_token()
+    if token:
+        manager.set(
+            "paletownia_admin",
+            token,
+            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+        )
+
+
+def clear_persistent_admin_login():
+    try:
+        get_cookie_manager().delete("paletownia_admin")
+    except Exception:
+        pass
+
+
 def make_excel(products, pallet_name, cost):
     wb=Workbook(); ws=wb.active; ws.title="Produkty"; ws.append(FIELDS)
     fill=PatternFill("solid",fgColor="D9EAF7")
@@ -526,6 +576,11 @@ if "last_added" not in st.session_state: st.session_state.last_added=None
 if "admin_logged_in" not in st.session_state: st.session_state.admin_logged_in = False
 if "products_page" not in st.session_state: st.session_state.products_page = 1
 if "app_page" not in st.session_state: st.session_state.app_page = "home"
+
+# Trwałe logowanie: po pierwszym poprawnym PIN-ie przeglądarka dostaje
+# cookie ważne 30 dni. Dzięki temu zamknięcie karty/aplikacji nie wylogowuje admina.
+if not st.session_state.admin_logged_in:
+    persistent_admin_login()
 
 # Paletownia jest wyłącznie panelem administracyjnym.
 # Po wejściu na stronę użytkownik od razu dostaje ekran PIN-u.
@@ -553,6 +608,7 @@ if not st.session_state.admin_logged_in:
             if configured_pin and pin == configured_pin:
                 st.session_state.admin_logged_in = True
                 st.session_state.admin_login_error = False
+                persist_admin_login()
                 st.rerun()
             else:
                 st.session_state.admin_login_error = True
@@ -577,6 +633,7 @@ with admin_left:
     st.markdown("### 🔐 Paletownia — panel właściciela")
 with admin_right:
     if st.button("Wyloguj", use_container_width=True, key="admin_logout"):
+        clear_persistent_admin_login()
         st.session_state.admin_logged_in = False
         st.rerun()
 
