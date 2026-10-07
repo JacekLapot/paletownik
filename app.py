@@ -850,22 +850,37 @@ else:
         # Kompaktowy widok: karty w siatce + paginacja. Szczegóły edycji są zwinięte.
         st.markdown("""
         <style>
+        /* Stały układ kart — niezależny od proporcji zdjęcia i długości nazwy. */
         .product-card-compact {
             border:1px solid #e5e7eb; border-radius:14px; padding:10px;
             margin:5px 0 10px 0; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.05);
-            min-height:250px;
         }
-        .compact-name { font-size:.96rem; font-weight:750; line-height:1.2; min-height:42px; }
+        .compact-photo {
+            width:100%; height:190px; border-radius:10px; overflow:hidden;
+            background:#f8fafc; display:flex; align-items:center; justify-content:center;
+            border:1px solid #eef2f7; margin-bottom:8px;
+        }
+        .compact-photo img {
+            width:100%; height:100%; object-fit:contain; display:block;
+        }
+        .compact-photo.empty {
+            border:1px dashed #cbd5e1; color:#94a3b8; font-size:30px;
+        }
+        .compact-name {
+            font-size:.96rem; font-weight:750; line-height:1.2;
+            height:58px; overflow:hidden; display:-webkit-box;
+            -webkit-line-clamp:3; -webkit-box-orient:vertical;
+        }
         .compact-price { font-size:1.12rem; font-weight:800; margin:3px 0; }
-        .compact-meta { color:#6b7280; font-size:.78rem; line-height:1.3; }
+        .compact-meta { color:#6b7280; font-size:.78rem; line-height:1.3; min-height:20px; }
         .level-badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:.72rem; font-weight:700; margin:2px 0; }
         .lvl1 { background:#fff1bf; color:#6b5200; }
         .lvl2 { background:#dcfce7; color:#166534; }
         .lvl3 { background:#ffedd5; color:#9a3412; }
         .lvl4 { background:#fee2e2; color:#991b1b; }
         @media (max-width: 900px) {
-          .compact-name { font-size:.9rem; }
-          .product-card-compact { min-height:235px; }
+          .compact-name { font-size:.9rem; height:54px; }
+          .compact-photo { height:175px; }
         }
         </style>
         """, unsafe_allow_html=True)
@@ -895,11 +910,15 @@ else:
 
             with st.container(border=True):
                 if thumb:
-                    st.image(thumb, width="stretch")
+                    # Nie używamy st.image, bo zachowuje proporcje zdjęcia i przez to
+                    # każda karta ma inną wysokość. Stały box + object-fit daje równy rząd.
+                    st.markdown(
+                        f'<div class="compact-photo"><img src="{escape(thumb, quote=True)}" alt=""></div>',
+                        unsafe_allow_html=True
+                    )
                 else:
                     st.markdown(
-                        '<div style="height:125px;display:flex;align-items:center;justify-content:center;'
-                        'border:1px dashed #cbd5e1;border-radius:10px;color:#94a3b8;font-size:30px;">📷</div>',
+                        '<div class="compact-photo empty">📷</div>',
                         unsafe_allow_html=True
                     )
 
