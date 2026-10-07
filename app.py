@@ -217,7 +217,8 @@ def load_products(conn, pallet_id):
            new_price AS \"Cena nowego\", used_price AS \"Cena używanego\", real_sale_price AS \"Realna cena sprzedaży\",
            listing_price AS \"Cena wystawienia\", price_source AS \"Źródło ceny\", offer_link AS \"Link do oferty\",
            notes AS \"Uwagi\", priority AS \"Priorytet\", image_thumb AS \"Miniatura\",
-           sale_status AS \"Status sprzedaży\", sold_price AS \"Cena sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\"
+           sale_status AS \"Status sprzedaży\", sold_price AS \"Cena sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\",
+           package_l AS \"Długość paczki\", package_w AS \"Szerokość paczki\", package_h AS \"Wysokość paczki\", package_weight AS \"Waga paczki\"
     FROM products WHERE pallet_id = :pallet_id ORDER BY position, id
     """
     df = db_query(conn, sql, {"pallet_id": int(pallet_id)})
