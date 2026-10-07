@@ -18,6 +18,10 @@ from PIL import Image
 
 st.set_page_config(page_title="Paletownia", page_icon="📦", layout="wide")
 
+# CookieManager jest widgetem Streamlit — musi być tworzony poza @st.cache_* .
+# Jedna instancja na uruchomienie aplikacji wystarcza do odczytu/zapisu trwałego logowania.
+cookie_manager = stx.CookieManager()
+
 # Paletownia PWA metadata
 st.markdown(
     """
@@ -503,11 +507,6 @@ def excel_safe_value(value):
     return value
 
 
-@st.cache_resource
-def get_cookie_manager():
-    return stx.CookieManager()
-
-
 def admin_session_token():
     """Stały, nieodwracalny token dla przeglądarki administratora."""
     secret = str(st.secrets.get("ADMIN_SESSION_SECRET", "")).strip()
@@ -523,7 +522,7 @@ def admin_session_token():
 def persistent_admin_login():
     """Odtwarza logowanie z trwałego cookie przeglądarki."""
     try:
-        manager = get_cookie_manager()
+        manager = cookie_manager
         token = manager.get(cookie="paletownia_admin")
         expected = admin_session_token()
         if token and expected and hmac.compare_digest(str(token), expected):
@@ -534,7 +533,7 @@ def persistent_admin_login():
 
 
 def persist_admin_login():
-    manager = get_cookie_manager()
+    manager = cookie_manager
     token = admin_session_token()
     if token:
         manager.set(
@@ -546,7 +545,7 @@ def persist_admin_login():
 
 def clear_persistent_admin_login():
     try:
-        get_cookie_manager().delete("paletownia_admin")
+        cookie_manager.delete("paletownia_admin")
     except Exception:
         pass
 
