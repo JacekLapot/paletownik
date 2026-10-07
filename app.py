@@ -451,11 +451,26 @@ def analyze_image(image_bytes, mime_type):
     return json.loads(response.output_text)
 
 
+def excel_safe_value(value):
+    """Zamienia daty z PostgreSQL TIMESTAMPTZ na wartości akceptowane przez Excel."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    # Obsługa obiektów datetime/time z tzinfo, jeśli takie pojawią się w danych.
+    try:
+        from datetime import time as datetime_time
+        if isinstance(value, datetime_time):
+            return value.replace(tzinfo=None)
+    except Exception:
+        pass
+    return value
+
+
 def make_excel(products, pallet_name, cost):
     wb=Workbook(); ws=wb.active; ws.title="Produkty"; ws.append(FIELDS)
     fill=PatternFill("solid",fgColor="D9EAF7")
     for c in ws[1]: c.font=Font(bold=True); c.fill=fill; c.alignment=Alignment(horizontal="center")
-    for row in products: ws.append([row.get(f,"") for f in FIELDS])
+    for row in products:
+        ws.append([excel_safe_value(row.get(f,"")) for f in FIELDS])
     ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
     for i,w in enumerate([7,9,22,18,30,18,22,25,16,18,24,18,25,45,45,28,18,18,20,20],1): ws.column_dimensions[__import__('openpyxl').utils.get_column_letter(i)].width=w
     s=wb.create_sheet("Podsumowanie"); s["A1"]="PODSUMOWANIE PALETY"; s["A1"].font=Font(bold=True,size=16)
