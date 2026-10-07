@@ -873,6 +873,8 @@ else:
         }
         .compact-price { font-size:1.12rem; font-weight:800; margin:3px 0; }
         .compact-meta { color:#6b7280; font-size:.78rem; line-height:1.3; min-height:20px; }
+        .sold-slot { min-height:25px; line-height:20px; margin:2px 0; }
+        .offer-placeholder { height:50px; margin:6px 0; }
         .level-badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:.72rem; font-weight:700; margin:2px 0; }
         .lvl1 { background:#fff1bf; color:#6b5200; }
         .lvl2 { background:#dcfce7; color:#166534; }
@@ -929,14 +931,24 @@ else:
                     f'<div class="compact-meta">Ilość: <b>{int(r["Ilość"])}</b> · {status_icon} {escape(status)}</div>',
                     unsafe_allow_html=True
                 )
+                # Każda karta dostaje identyczne miejsce na informację o sprzedaży.
+                # Bez tego karta produktu „Sprzedany” jest wyższa i kolejna karta
+                # w pierwszej kolumnie zaczyna się niżej niż w pozostałych kolumnach.
                 if status == "Sprzedany":
-                    st.caption(f'Sprzedano za {float(r.get("Cena sprzedaży",0) or 0):.0f} zł')
+                    sold_text = f'Sprzedano za {float(r.get("Cena sprzedaży",0) or 0):.0f} zł'
+                else:
+                    sold_text = "&nbsp;"
+                st.markdown(f'<div class="sold-slot">{sold_text}</div>', unsafe_allow_html=True)
 
-                if str(r.get("Link do oferty") or "").strip():
+                offer_url = str(r.get("Link do oferty") or "").strip()
+                if offer_url:
                     try:
-                        st.link_button("🔗 Oferta", str(r["Link do oferty"]), use_container_width=True)
+                        st.link_button("🔗 Oferta", offer_url, use_container_width=True)
                     except Exception:
-                        st.markdown(f'[🔗 Oferta]({r["Link do oferty"]})')
+                        st.markdown(f'[🔗 Oferta]({offer_url})')
+                else:
+                    # Rezerwujemy dokładnie tyle miejsca, ile zajmuje przycisk „Oferta”.
+                    st.markdown('<div class="offer-placeholder"></div>', unsafe_allow_html=True)
 
                 with st.expander("✏️ Edytuj", expanded=False):
                     with st.form(key=f"product_edit_form_{product_id}", clear_on_submit=False):
