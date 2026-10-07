@@ -6,6 +6,7 @@ import os
 from html import escape
 from datetime import datetime, timezone, timedelta
 import hmac
+import time
 
 import pandas as pd
 import streamlit as st
@@ -608,6 +609,9 @@ if not st.session_state.admin_logged_in:
                 st.session_state.admin_logged_in = True
                 st.session_state.admin_login_error = False
                 persist_admin_login()
+                # CookieManager zapisuje cookie po stronie przeglądarki asynchronicznie.
+                # Dajemy komponentowi chwilę na wykonanie zapisu przed rerunem.
+                time.sleep(1.5)
                 st.rerun()
             else:
                 st.session_state.admin_login_error = True
