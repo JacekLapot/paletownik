@@ -36,7 +36,8 @@ FIELDS = [
     "Lp.", "Ilość", "Kategoria", "Marka", "Produkt", "Model", "Stan",
     "Kompletność", "Cena nowego", "Cena używanego", "Realna cena sprzedaży",
     "Cena wystawienia", "Źródło ceny", "Link do oferty", "Uwagi", "Priorytet",
-    "Status sprzedaży", "Cena sprzedaży", "Data wystawienia", "Data sprzedaży"
+    "Status sprzedaży", "Cena sprzedaży", "Data wystawienia", "Data sprzedaży",
+    "Długość paczki", "Szerokość paczki", "Wysokość paczki", "Waga paczki"
 ]
 PRIORITIES = ["🟡 Priorytet", "🟢 Ważne", "🟠 Mogą poczekać", "🔴 Badziew"]
 
@@ -122,13 +123,21 @@ CREATE TABLE IF NOT EXISTS products (
     sale_status TEXT NOT NULL DEFAULT 'Na stanie',
     sold_price NUMERIC(12,2) NOT NULL DEFAULT 0,
     listed_at TIMESTAMPTZ NULL,
-    sold_at TIMESTAMPTZ NULL
+    sold_at TIMESTAMPTZ NULL,
+    package_l NUMERIC(8,2) NOT NULL DEFAULT 0,
+    package_w NUMERIC(8,2) NOT NULL DEFAULT 0,
+    package_h NUMERIC(8,2) NOT NULL DEFAULT 0,
+    package_weight NUMERIC(8,2) NOT NULL DEFAULT 0
 );
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_thumb TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sale_status TEXT NOT NULL DEFAULT 'Na stanie';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_price NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS listed_at TIMESTAMPTZ NULL;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ NULL;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS package_l NUMERIC(8,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS package_w NUMERIC(8,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS package_h NUMERIC(8,2) NOT NULL DEFAULT 0;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS package_weight NUMERIC(8,2) NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_products_pallet_id ON products(pallet_id);
 """
 
@@ -185,6 +194,22 @@ def load_pallets(conn):
     return db_query(conn, "SELECT id, name, cost, created_at, updated_at FROM pallets ORDER BY updated_at DESC, id DESC")
 
 
+def load_all_packaging(conn):
+    """Zwraca wszystkie produkty z zapisanymi wymiarami paczek ze wszystkich palet."""
+    sql = """
+    SELECT p.id, p.pallet_id, p.position, p.quantity, p.category, p.brand, p.product, p.model,
+           p.package_l, p.package_w, p.package_h, p.package_weight, pl.name AS pallet_name
+    FROM products p
+    JOIN pallets pl ON pl.id = p.pallet_id
+    WHERE COALESCE(p.package_l,0) > 0
+      AND COALESCE(p.package_w,0) > 0
+      AND COALESCE(p.package_h,0) > 0
+    ORDER BY p.package_l, p.package_w, p.package_h, p.id
+    """
+    df = db_query(conn, sql, ttl=5)
+    return df.to_dict("records")
+
+
 def load_products(conn, pallet_id):
     sql = """
     SELECT id, position AS \"Lp.\", quantity AS \"Ilość\", category AS \"Kategoria\", brand AS \"Marka\",
@@ -204,6 +229,8 @@ def load_products(conn, pallet_id):
         r["Ilość"] = int(r["Ilość"] or 1)
         r["Cena sprzedaży"] = float(r.get("Cena sprzedaży") or 0)
         r["Status sprzedaży"] = str(r.get("Status sprzedaży") or "Na stanie")
+        for k in ["Długość paczki","Szerokość paczki","Wysokość paczki","Waga paczki"]:
+            r[k] = float(r.get(k) or 0)
         r["Lp."] = int(r["Lp."])
         r["_db_id"] = int(r["id"])
         r.pop("id", None)
@@ -226,6 +253,43 @@ def make_thumbnail_data_url(image_bytes, max_size=1000):
         return ""
 
 
+CARRIER_LIMITS = {
+    "InPost": {"A": (8, 38, 64, 25), "B": (19, 38, 64, 25), "C": (41, 38, 64, 25)},
+    "DPD automat": {"A": (11, 44, 59, 20), "B": (24, 44, 59, 20), "C": (50, 44, 59, 20)},
+    "ORLEN Paczka": {"A": (8, 38, 60, 20), "B": (19, 38, 60, 20), "C": (41, 38, 60, 20)},
+}
+
+def package_with_padding(l, w, h):
+    return tuple(round(float(x) + 2, 1) for x in (l, w, h))
+
+def fits_box(dims, limits):
+    if not dims or any(float(x) <= 0 for x in dims):
+        return False
+    a = sorted(float(x) for x in dims)
+    b = sorted(float(x) for x in limits[:3])
+    return all(x <= y + 1e-9 for x, y in zip(a, b))
+
+def carrier_matches(l, w, h, weight=0):
+    dims = package_with_padding(l, w, h)
+    result = []
+    for carrier, sizes in CARRIER_LIMITS.items():
+        for name, lim in sizes.items():
+            if fits_box(dims, lim) and (float(weight or 0) <= 0 or float(weight) <= lim[3]):
+                result.append((carrier, name))
+    return result
+
+def best_shipping_options(l, w, h, weight=0):
+    dims = package_with_padding(l, w, h)
+    out = {}
+    for carrier, sizes in CARRIER_LIMITS.items():
+        hit = None
+        for name, lim in sizes.items():
+            if fits_box(dims, lim) and (float(weight or 0) <= 0 or float(weight) <= lim[3]):
+                hit = name
+                break
+        out[carrier] = hit
+    return dims, out
+
 def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
     row = {
         "position": 1,
@@ -235,7 +299,9 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         "real_sale_price": data["realna_cena_sprzedazy"], "listing_price": data["cena_wystawienia"],
         "price_source": data["zrodlo_ceny"], "offer_link": data["link_do_oferty"],
         "notes": data["uwagi"] + f" | Pewność identyfikacji: {data['pewnosc_ident']}", "priority": priority_from_price(data["realna_cena_sprzedazy"]),
-        "image_thumb": image_thumb or "", "sale_status": "Na stanie"
+        "image_thumb": image_thumb or "", "sale_status": "Na stanie",
+        "package_l": data.get("package_l", 0), "package_w": data.get("package_w", 0),
+        "package_h": data.get("package_h", 0), "package_weight": data.get("package_weight", 0)
     }
     with conn.session as s:
         max_position = s.execute(
@@ -245,9 +311,9 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         row["position"] = int(max_position)
         result = s.execute(text("""
             INSERT INTO products (pallet_id, position, quantity, category, brand, product, model, state, completeness,
-                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority, image_thumb, sale_status)
+                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority, image_thumb, sale_status, package_l, package_w, package_h, package_weight)
             VALUES (:pallet_id,:position,:quantity,:category,:brand,:product,:model,:state,:completeness,
-                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,:notes,:priority,:image_thumb,:sale_status)
+                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,:notes,:priority,:image_thumb,:sale_status,:package_l,:package_w,:package_h,:package_weight)
             RETURNING id
         """), {"pallet_id":int(pallet_id), **row})
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=:id"), {"id":int(pallet_id)})
@@ -256,11 +322,14 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
     return int(result.scalar_one())
 
 
-def update_product(conn, product_id, quantity, real_price, listing_price, priority=None, offer_link=None, product_name=None):
+def update_product(conn, product_id, quantity, real_price, listing_price, priority=None, offer_link=None, product_name=None, package_l=None, package_w=None, package_h=None, package_weight=None):
     priority = priority_from_price(real_price)
     with conn.session as s:
         params={"q":int(quantity),"r":float(real_price),"l":float(listing_price),"p":priority,"id":int(product_id)}
         sets="quantity=:q, real_sale_price=:r, listing_price=:l, priority=:p"
+        if package_l is not None:
+            sets += ", package_l=:pl, package_w=:pw, package_h=:ph, package_weight=:pwt"
+            params.update({"pl":float(package_l or 0),"pw":float(package_w or 0),"ph":float(package_h or 0),"pwt":float(package_weight or 0)})
         if offer_link is not None:
             sets += ", offer_link=:o"
             params["o"] = str(offer_link or "").strip()
@@ -383,19 +452,10 @@ def analyze_image(image_bytes, mime_type):
 
 
 def make_excel(products, pallet_name, cost):
-    # Excel (.xlsx) nie obsługuje datetime z informacją o strefie czasowej.
-    # PostgreSQL zwraca pola TIMESTAMPTZ jako datetime z tzinfo, więc przed
-    # zapisaniem arkusza usuwamy tylko informację o strefie czasowej.
-    def excel_safe_value(value):
-        if isinstance(value, datetime):
-            return value.replace(tzinfo=None)
-        return value
-
     wb=Workbook(); ws=wb.active; ws.title="Produkty"; ws.append(FIELDS)
     fill=PatternFill("solid",fgColor="D9EAF7")
     for c in ws[1]: c.font=Font(bold=True); c.fill=fill; c.alignment=Alignment(horizontal="center")
-    for row in products:
-        ws.append([excel_safe_value(row.get(f, "")) for f in FIELDS])
+    for row in products: ws.append([row.get(f,"") for f in FIELDS])
     ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
     for i,w in enumerate([7,9,22,18,30,18,22,25,16,18,24,18,25,45,45,28,18,18,20,20],1): ws.column_dimensions[__import__('openpyxl').utils.get_column_letter(i)].width=w
     s=wb.create_sheet("Podsumowanie"); s["A1"]="PODSUMOWANIE PALETY"; s["A1"].font=Font(bold=True,size=16)
@@ -746,14 +806,7 @@ st.divider()
 c1,c2=st.columns(2)
 with c1:
     st.subheader("📸 Zrób zdjęcie")
-    # Po każdym przetworzonym zdjęciu zwiększamy numer klucza. Dzięki temu
-    # kamera jest od razu gotowa na kolejne zdjęcie — bez ręcznego „Clear photo”.
-    camera_key_version = int(st.session_state.get("camera_key_version", 0))
-    camera=st.camera_input(
-        "Aparat",
-        key=f"camera_{st.session_state.current_pallet_id}_{camera_key_version}",
-        resolution="720p"
-    )
+    camera=st.camera_input("Aparat", key=f"camera_{st.session_state.current_pallet_id}", resolution="720p")
 with c2:
     st.subheader("📁 Wybierz z urządzenia")
     upload=st.file_uploader("Zdjęcie produktu", type=["jpg","jpeg","png","webp"], key=f"uploader_{st.session_state.current_pallet_id}")
@@ -785,9 +838,6 @@ if image_file is not None:
                         "kind":"new", "name":f"{data['marka']} {data['produkt']} {data['model']}".strip(),
                         "quantity":1, "price":float(data["realna_cena_sprzedazy"]), "link":data.get("link_do_oferty", "")
                     }
-                # Zresetuj widget kamery przed kolejnym przebiegiem aplikacji.
-                # Użytkownik od razu dostaje ponownie możliwość zrobienia zdjęcia.
-                st.session_state.camera_key_version = int(st.session_state.get("camera_key_version", 0)) + 1
                 st.rerun()
             except Exception as exc:
                 st.session_state.last_analyzed_hash=None
@@ -977,11 +1027,21 @@ if products:
                     new_listing = st.number_input("Cena wystawienia", min_value=0.0, value=float(r["Cena wystawienia"]), step=5.0, key=f"card_edit_listing_{r['_db_id']}")
                 with e4:
                     st.metric("Poziom", level_label(new_real))
+                st.markdown("**📦 Wymiary paczki / wysyłka**")
+                p1, p2, p3, p4 = st.columns(4)
+                with p1: pkg_l = st.number_input("Długość (cm)", min_value=0.0, value=float(r.get("Długość paczki",0)), step=0.5, key=f"pkg_l_{r['_db_id']}")
+                with p2: pkg_w = st.number_input("Szerokość (cm)", min_value=0.0, value=float(r.get("Szerokość paczki",0)), step=0.5, key=f"pkg_w_{r['_db_id']}")
+                with p3: pkg_h = st.number_input("Wysokość (cm)", min_value=0.0, value=float(r.get("Wysokość paczki",0)), step=0.5, key=f"pkg_h_{r['_db_id']}")
+                with p4: pkg_weight = st.number_input("Waga (kg)", min_value=0.0, value=float(r.get("Waga paczki",0)), step=0.1, key=f"pkg_weight_{r['_db_id']}")
+                if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
+                    pdims, pops = best_shipping_options(pkg_l, pkg_w, pkg_h, pkg_weight)
+                    st.caption(f"📐 Karton z wypełnieniem (+2 cm na każdy bok): **{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**")
+                    st.caption(" • ".join(f"{k}: **{v or 'poza automatem'}**" for k,v in pops.items()))
                 new_offer = st.text_input("Link do przykładowej oferty", value=str(r.get("Link do oferty", "") or ""), key=f"card_edit_offer_{r['_db_id']}")
                 b1, b2 = st.columns(2)
                 with b1:
                     if st.button("💾 Zapisz zmiany", key=f"card_save_{r['_db_id']}", use_container_width=True):
-                        update_product(conn, r["_db_id"], new_qty, new_real, new_listing, None, new_offer, new_product_name)
+                        update_product(conn, r["_db_id"], new_qty, new_real, new_listing, None, new_offer, new_product_name, pkg_l, pkg_w, pkg_h, pkg_weight)
                         st.rerun()
                 with b2:
                     if st.button("🗑️ Usuń produkt", key=f"card_delete_{r['_db_id']}", use_container_width=True):
@@ -1014,6 +1074,16 @@ if products:
         with e2: new_real=st.number_input("Realna sprzedaż / szt.",min_value=0.0,value=float(row['Realna cena sprzedaży']),step=5.0,key=f"edit_real_{row['_db_id']}")
         with e3: new_listing=st.number_input("Cena wystawienia",min_value=0.0,value=float(row['Cena wystawienia']),step=5.0,key=f"edit_listing_{row['_db_id']}")
         with e4: st.metric("Poziom", level_label(new_real))
+        st.markdown("**📦 Wymiary paczki / wysyłka**")
+        p1,p2,p3,p4=st.columns(4)
+        with p1: pkg_l=st.number_input("Długość (cm)",min_value=0.0,value=float(row.get("Długość paczki",0)),step=0.5,key=f"manual_pkg_l_{row['_db_id']}")
+        with p2: pkg_w=st.number_input("Szerokość (cm)",min_value=0.0,value=float(row.get("Szerokość paczki",0)),step=0.5,key=f"manual_pkg_w_{row['_db_id']}")
+        with p3: pkg_h=st.number_input("Wysokość (cm)",min_value=0.0,value=float(row.get("Wysokość paczki",0)),step=0.5,key=f"manual_pkg_h_{row['_db_id']}")
+        with p4: pkg_weight=st.number_input("Waga (kg)",min_value=0.0,value=float(row.get("Waga paczki",0)),step=0.1,key=f"manual_pkg_weight_{row['_db_id']}")
+        if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
+            pdims,pops=best_shipping_options(pkg_l,pkg_w,pkg_h,pkg_weight)
+            st.caption(f"📐 Karton z wypełnieniem (+2 cm na każdy bok): **{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**")
+            st.caption(" • ".join(f"{k}: **{v or 'poza automatem'}**" for k,v in pops.items()))
         new_offer=st.text_input("Link do przykładowej oferty",value=str(row.get("Link do oferty","") or ""),key=f"edit_offer_{row['_db_id']}")
         st.markdown("**💰 Status sprzedaży**")
         current_status = str(row.get("Status sprzedaży") or "Na stanie")
@@ -1021,13 +1091,61 @@ if products:
         manual_sold_price = st.number_input("Za ile sprzedano?", min_value=0.0, value=float(row.get("Cena sprzedaży",0) or 0), step=5.0, key=f"manual_sold_price_{row['_db_id']}") if manual_status == "Sprzedany" else 0.0
         st.caption("Poziom jest automatycznie wyliczany z realnej ceny sprzedaży: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
         if st.button("💾 Zapisz zmiany",use_container_width=True):
-            update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer,new_product_name)
+            update_product(conn,row['_db_id'],new_qty,new_real,new_listing,None,new_offer,new_product_name,pkg_l,pkg_w,pkg_h,pkg_weight)
             update_sale_status(conn,row['_db_id'],manual_status,manual_sold_price)
             st.rerun()
         if st.button("🗑️ Usuń wybraną pozycję",use_container_width=True): delete_product(conn,row['_db_id']); st.rerun()
 else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
 
 if products:
+    st.divider()
+    with st.expander("📦 Kartony i wysyłka — analiza całej bazy", expanded=False):
+        all_pack = load_all_packaging(conn)
+        if not all_pack:
+            st.info("Dodaj wymiary paczek przy produktach, aby Paletownia mogła policzyć gabaryty i zapotrzebowanie na kartony.")
+        else:
+            st.caption("Wpisujesz rzeczywiste wymiary mierzonego pakunku/produktu. Paletownia automatycznie dodaje **2 cm do każdego wymiaru** jako zapas na wypełnienie i dopiero tak powiększone wymiary porównuje z limitami przewoźników.")
+
+            rows=[]
+            carrier_counts={k:{"A":0,"B":0,"C":0} for k in CARRIER_LIMITS}
+            courier_needed=0
+            for r in all_pack:
+                dims,opts=best_shipping_options(r["package_l"],r["package_w"],r["package_h"],r.get("package_weight",0))
+                qty=max(1,int(r.get("quantity") or 1))
+                rows.extend([dims] * qty)
+                for carrier, gab in opts.items():
+                    if gab:
+                        carrier_counts[carrier][gab] += qty
+                if not any(opts.values()):
+                    courier_needed += qty
+
+            st.markdown("### 📊 Jakich kartonów potrzebujesz najczęściej?")
+            counts=pd.Series([tuple(round(x,1) for x in d) for d in rows]).value_counts()
+            for dims,count in counts.head(10).items():
+                st.write(f"📦 **{dims[0]:g} × {dims[1]:g} × {dims[2]:g} cm** — **{int(count)} szt.**")
+
+            st.markdown("### 🚚 W jakich automatach zmieszczą się paczki?")
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric("InPost", sum(carrier_counts["InPost"].values()))
+            c2.metric("DPD automat", sum(carrier_counts["DPD automat"].values()))
+            c3.metric("ORLEN Paczka", sum(carrier_counts["ORLEN Paczka"].values()))
+            c4.metric("Poza automatami", courier_needed)
+
+            st.markdown("**Najmniejszy dostępny gabaryt dla każdego przewoźnika:**")
+            for carrier in CARRIER_LIMITS:
+                counts_c=carrier_counts[carrier]
+                best=next((g for g in ["A","B","C"] if counts_c[g]), "—")
+                st.caption(f"{carrier}: **{best}** — A: {counts_c['A']} szt. • B: {counts_c['B']} szt. • C: {counts_c['C']} szt.")
+
+            st.markdown("### 📋 Produkty wymagające największych kartonów / kuriera")
+            for r in all_pack:
+                dims,opts=best_shipping_options(r["package_l"],r["package_w"],r["package_h"],r.get("package_weight",0))
+                if not any(opts.values()):
+                    name=f"{r['brand']} {r['product']} {r['model']}".strip()
+                    st.warning(f"{name} — {dims[0]:g} × {dims[1]:g} × {dims[2]:g} cm po dodaniu zapasu. **Nie mieści się w automatach InPost, DPD ani ORLEN Paczka** — potrzebny kurier / inna usługa.")
+
+            st.caption("Dopasowanie uwzględnia obrót prostopadłościanu, tak aby wymiary mogły zostać ustawione w najbardziej korzystnej orientacji. Limity wagowe są sprawdzane, jeśli podasz wagę paczki.")
+
     st.divider(); st.subheader("📥 Eksport")
     excel=make_excel(products,str(current['name']),float(current['cost']))
     safe=re.sub(r"[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ _-]+","",str(current['name'])).strip().replace(' ','_') or 'paleta'
