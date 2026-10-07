@@ -525,6 +525,7 @@ if "last_analyzed_hash" not in st.session_state: st.session_state.last_analyzed_
 if "last_added" not in st.session_state: st.session_state.last_added=None
 if "admin_logged_in" not in st.session_state: st.session_state.admin_logged_in = False
 if "products_page" not in st.session_state: st.session_state.products_page = 1
+if "app_page" not in st.session_state: st.session_state.app_page = "home"
 
 # Paletownia jest wyłącznie panelem administracyjnym.
 # Po wejściu na stronę użytkownik od razu dostaje ekran PIN-u.
@@ -589,412 +590,429 @@ if current_row.empty:
 current=current_row.iloc[0]
 products=load_products(conn, int(st.session_state.current_pallet_id))
 
-with st.sidebar:
-    st.header("⚙️ Palety")
-    name=st.text_input("Nazwa bieżącej palety", value=str(current["name"]), key="pallet_name_input")
-    cost=st.number_input("Koszt palety (zł)", min_value=0.0, value=float(current["cost"]), step=10.0, key="pallet_cost_input")
-    if st.button("💾 Zapisz nazwę i koszt", use_container_width=True):
-        update_pallet(conn, st.session_state.current_pallet_id, name, cost); st.rerun()
-    if st.button("🆕 Nowa paleta", use_container_width=True, type="primary"):
-        pid=create_pallet(conn, "Nowa paleta", 360); st.session_state.current_pallet_id=pid; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.session_state.last_added=None; st.rerun()
-    st.divider(); st.subheader("📚 Historia palet")
-    labels=[f"{int(r.id)} — {r['name']} — {str(r['updated_at'])[:16]}" for _,r in pallets.iterrows()]
-    selected=st.selectbox("Wybierz paletę", labels, index=max(0,next((i for i,r in pallets.iterrows() if int(r.id)==st.session_state.current_pallet_id),0)), key="pallet_selector")
-    selected_id=int(selected.split(" — ",1)[0])
-    if selected_id != st.session_state.current_pallet_id:
-        st.session_state.current_pallet_id=selected_id; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.session_state.last_added=None; st.rerun()
-    hist_row=pallets[pallets["id"]==selected_id].iloc[0]
-    hist_products=load_products(conn, selected_id)
-    st.caption(f"{len(hist_products)} pozycji • {sum(int(r['Ilość']) for r in hist_products)} szt. • wartość {total_value(hist_products):.0f} zł")
-    if st.button("🗑️ Usuń wybraną paletę", use_container_width=True):
-        if len(pallets)>1:
-            delete_pallet(conn, selected_id); st.session_state.current_pallet_id=int(pallets[pallets['id']!=selected_id].iloc[0]['id']); st.session_state.pending=None; st.rerun()
-        else: st.warning("Nie można usunąć jedynej palety.")
-    st.divider(); st.write("**Status API:**")
-    if get_client():
-        st.success("OPENAI_API_KEY ustawiony")
-    else:
-        st.error("Brak OPENAI_API_KEY")
 
-st.title("📦 Paletownia")
-st.subheader(f"🗂️ {current['name']}")
-total=total_value(products); units=sum(int(r['Ilość']) for r in products)
-m1,m2,m3,m4=st.columns(4); m1.metric("Pozycje",len(products)); m2.metric("Sztuki",units); m3.metric("Wartość palety",f"{total:,.0f} zł"); m4.metric("Nadwyżka",f"{total-float(current['cost']):,.0f} zł")
-st.divider()
 
-c1,c2=st.columns(2)
-with c1:
-    st.subheader("📸 Zrób zdjęcie")
-    camera=st.camera_input("Aparat", key=f"camera_{st.session_state.current_pallet_id}", resolution="720p")
-with c2:
-    st.subheader("📁 Wybierz z urządzenia")
-    upload=st.file_uploader("Zdjęcie produktu", type=["jpg","jpeg","png","webp"], key=f"uploader_{st.session_state.current_pallet_id}")
-image_file=camera if camera is not None else upload
-if image_file is not None:
-    b=image_file.getvalue(); h=hashlib.sha256(b).hexdigest(); st.image(image_file, caption="Wybrane zdjęcie", width="stretch")
-    if h != st.session_state.last_analyzed_hash:
-        st.session_state.last_analyzed_hash=h
-        with st.spinner("🤖 AI rozpoznaje produkt i sprawdza aktualne ceny..."):
-            try:
-                data=analyze_image(b,getattr(image_file,"type","image/jpeg"))
-                # Automatyczne dodanie do palety bez akceptacji.
-                products_now=load_products(conn, int(st.session_state.current_pallet_id))
-                thumb = make_thumbnail_data_url(b)
-                duplicate_idx=find_duplicate(products_now,data)
-                if duplicate_idx is not None:
-                    existing=products_now[duplicate_idx]
-                    new_qty=int(existing["Ilość"])+1
-                    update_product(conn, existing["_db_id"], new_qty, existing["Realna cena sprzedaży"], existing["Cena wystawienia"], existing["Priorytet"])
-                    if not existing.get("Miniatura"):
-                        update_product_thumbnail(conn, existing["_db_id"], thumb)
-                    st.session_state.last_added={
-                        "kind":"duplicate", "name":f"{existing['Marka']} {existing['Produkt']} {existing['Model']}",
-                        "quantity":new_qty, "price":float(existing["Realna cena sprzedaży"])
-                    }
-                else:
-                    save_product(conn, int(st.session_state.current_pallet_id), data, 1, thumb)
-                    st.session_state.last_added={
-                        "kind":"new", "name":f"{data['marka']} {data['produkt']} {data['model']}".strip(),
-                        "quantity":1, "price":float(data["realna_cena_sprzedazy"]), "link":data.get("link_do_oferty", "")
-                    }
-                st.rerun()
-            except Exception as exc:
-                st.session_state.last_analyzed_hash=None
-                st.error(f"Nie udało się przeanalizować zdjęcia: {exc}")
+# Główna nawigacja aplikacji
+nav_col1, nav_col2 = st.columns(2)
+with nav_col1:
+    if st.button("🏠 Strona główna", use_container_width=True, type="primary" if st.session_state.get("app_page", "home") == "home" else "secondary", key="nav_home"):
+        st.session_state.app_page = "home"
+        st.rerun()
+with nav_col2:
+    if st.button("📦 Produkty", use_container_width=True, type="primary" if st.session_state.get("app_page", "home") == "products" else "secondary", key="nav_products"):
+        st.session_state.app_page = "products"
+        st.rerun()
 
-if st.session_state.last_added:
-    added=st.session_state.last_added
-    if added.get("kind")=="duplicate":
-        st.success(f"✅ Produkt rozpoznany jako duplikat i automatycznie dodany jako kolejna sztuka: **{added['name']}**. Łącznie: **{added['quantity']} szt.**")
-    else:
-        st.success(f"✅ Produkt automatycznie dodany do palety: **{added['name']}** — realna sprzedaż: **{added['price']:.0f} zł**")
-        if added.get("link"):
-            st.markdown(f"[Przykładowa oferta]({added['link']})")
+app_page = st.session_state.get("app_page", "home")
 
-st.divider(); st.subheader("📋 Zawartość palety")
 
-sort_choice_mobile = st.selectbox(
-    "Sortowanie",
-    [
-        "Data dodania — najnowsze",
-        "Data dodania — najstarsze",
-        "Nazwa A–Z",
-        "Nazwa Z–A",
-        "Wartość — od najwyższej",
-        "Wartość — od najniższej",
-    ],
-    key="sort_choice_mobile",
-)
+if app_page == "home":
+    st.title("📦 Paletownia")
+    st.subheader("📸 Skanowanie produktu")
+    st.caption("Zrób zdjęcie produktu lub wybierz zdjęcie z urządzenia. Paletownia rozpozna produkt, sprawdzi aktualne ceny i zapisze go do bieżącej palety.")
 
-def _product_name_for_sort(r):
-    return " ".join(
-        str(x).strip()
-        for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")]
-        if str(x).strip()
-    ).lower()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("📸 Zrób zdjęcie")
+        camera = st.camera_input("Aparat", key=f"camera_home_{st.session_state.current_pallet_id}", resolution="720p")
+    with c2:
+        st.subheader("📁 Wybierz z urządzenia")
+        upload = st.file_uploader("Zdjęcie produktu", type=["jpg", "jpeg", "png", "webp"], key=f"uploader_home_{st.session_state.current_pallet_id}")
 
-def _product_value_for_sort(r):
-    return float(r.get("Ilość", 1) or 1) * float(r.get("Realna cena sprzedaży", 0) or 0)
+    image_file = camera if camera is not None else upload
+    if image_file is not None:
+        b = image_file.getvalue()
+        h = hashlib.sha256(b).hexdigest()
+        st.image(image_file, caption="Wybrane zdjęcie", width="stretch")
+        if h != st.session_state.last_analyzed_hash:
+            st.session_state.last_analyzed_hash = h
+            with st.spinner("🤖 AI rozpoznaje produkt i sprawdza aktualne ceny..."):
+                try:
+                    data = analyze_image(b, getattr(image_file, "type", "image/jpeg"))
+                    products_now = load_products(conn, int(st.session_state.current_pallet_id))
+                    thumb = make_thumbnail_data_url(b)
+                    duplicate_idx = find_duplicate(products_now, data)
+                    if duplicate_idx is not None:
+                        existing = products_now[duplicate_idx]
+                        new_qty = int(existing["Ilość"]) + 1
+                        update_product(conn, existing["_db_id"], new_qty, existing["Realna cena sprzedaży"], existing["Cena wystawienia"], existing["Priorytet"])
+                        if not existing.get("Miniatura"):
+                            update_product_thumbnail(conn, existing["_db_id"], thumb)
+                        st.session_state.last_added = {"kind":"duplicate", "name":f"{existing['Marka']} {existing['Produkt']} {existing['Model']}", "quantity":new_qty, "price":float(existing["Realna cena sprzedaży"])}
+                    else:
+                        save_product(conn, int(st.session_state.current_pallet_id), data, 1, thumb)
+                        st.session_state.last_added = {"kind":"new", "name":f"{data['marka']} {data['produkt']} {data['model']}".strip(), "quantity":1, "price":float(data["realna_cena_sprzedazy"]), "link":data.get("link_do_oferty", "")}
+                    st.rerun()
+                except Exception as exc:
+                    st.session_state.last_analyzed_hash = None
+                    st.error(f"Nie udało się przeanalizować zdjęcia: {exc}")
 
-def _product_date_for_sort(r):
-    # load_products returns created_at when available; fallback keeps stable order.
-    return str(r.get("created_at", r.get("Data dodania", "")) or "")
+    if st.session_state.last_added:
+        added = st.session_state.last_added
+        if added.get("kind") == "duplicate":
+            st.success(f"✅ Produkt rozpoznany jako duplikat i automatycznie dodany jako kolejna sztuka: **{added['name']}**. Łącznie: **{added['quantity']} szt.**")
+        else:
+            st.success(f"✅ Produkt automatycznie dodany do palety: **{added['name']}** — realna sprzedaż: **{added['price']:.0f} zł**")
+            if added.get("link"):
+                st.markdown(f"[Przykładowa oferta]({added['link']})")
 
-if products:
-    if sort_choice_mobile == "Nazwa A–Z":
-        products = sorted(products, key=_product_name_for_sort)
-    elif sort_choice_mobile == "Nazwa Z–A":
-        products = sorted(products, key=_product_name_for_sort, reverse=True)
-    elif sort_choice_mobile == "Wartość — od najwyższej":
-        products = sorted(products, key=_product_value_for_sort, reverse=True)
-    elif sort_choice_mobile == "Wartość — od najniższej":
-        products = sorted(products, key=_product_value_for_sort)
-    elif sort_choice_mobile == "Data dodania — najstarsze":
-        products = sorted(products, key=_product_date_for_sort)
-    else:
-        products = sorted(products, key=_product_date_for_sort, reverse=True)
-if products:
-    sold_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Sprzedany"]
-    listed_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Wystawiony"]
-    available_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") != "Sprzedany"]
-    sm1, sm2, sm3 = st.columns(3)
-    with sm1: st.metric("🟢 Wystawione", len(listed_rows))
-    with sm2: st.metric("🔴 Sprzedane", len(sold_rows))
-    with sm3: st.metric("💰 Przychód ze sprzedanych", f"{sum(float(r.get('Cena sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
-    # Mobile-first card view: much easier to scan on a phone than a wide dataframe.
-    st.markdown("""
-    <style>
-    .product-card { border:1px solid #e5e7eb; border-radius:16px; padding:12px; margin:8px 0; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.05); }
-    .product-name { font-size:1.02rem; font-weight:700; line-height:1.25; margin-bottom:5px; }
-    .product-meta { color:#6b7280; font-size:.86rem; line-height:1.35; }
-    .product-price { font-size:1.18rem; font-weight:800; margin-top:5px; }
-    .level-badge { display:inline-block; padding:4px 9px; border-radius:999px; font-size:.78rem; font-weight:700; margin:2px 0 4px; }
-    .lvl1 { background:#fff1bf; color:#6b5200; }
-    .lvl2 { background:#dcfce7; color:#166534; }
-    .lvl3 { background:#ffedd5; color:#9a3412; }
-    .lvl4 { background:#fee2e2; color:#991b1b; }
-    @media (max-width: 640px) {
-      .product-card { padding:10px; border-radius:14px; }
-      .product-name { font-size:.98rem; }
-      .product-price { font-size:1.1rem; }
-    }
-    </style>
-    """, unsafe_allow_html=True)
+else:
 
-    def level_css(label):
-        if "Priorytet" in label: return "lvl1"
-        if "Ważne" in label: return "lvl2"
-        if "Mogą poczekać" in label: return "lvl3"
-        return "lvl4"
+    with st.sidebar:
+            st.header("⚙️ Palety")
+            name=st.text_input("Nazwa bieżącej palety", value=str(current["name"]), key="pallet_name_input")
+            cost=st.number_input("Koszt palety (zł)", min_value=0.0, value=float(current["cost"]), step=10.0, key="pallet_cost_input")
+            if st.button("💾 Zapisz nazwę i koszt", use_container_width=True):
+                update_pallet(conn, st.session_state.current_pallet_id, name, cost); st.rerun()
+            if st.button("🆕 Nowa paleta", use_container_width=True, type="primary"):
+                pid=create_pallet(conn, "Nowa paleta", 360); st.session_state.current_pallet_id=pid; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.session_state.last_added=None; st.rerun()
+            st.divider(); st.subheader("📚 Historia palet")
+            labels=[f"{int(r.id)} — {r['name']} — {str(r['updated_at'])[:16]}" for _,r in pallets.iterrows()]
+            selected=st.selectbox("Wybierz paletę", labels, index=max(0,next((i for i,r in pallets.iterrows() if int(r.id)==st.session_state.current_pallet_id),0)), key="pallet_selector")
+            selected_id=int(selected.split(" — ",1)[0])
+            if selected_id != st.session_state.current_pallet_id:
+                st.session_state.current_pallet_id=selected_id; st.session_state.pending=None; st.session_state.last_analyzed_hash=None; st.session_state.last_added=None; st.rerun()
+            hist_row=pallets[pallets["id"]==selected_id].iloc[0]
+            hist_products=load_products(conn, selected_id)
+            st.caption(f"{len(hist_products)} pozycji • {sum(int(r['Ilość']) for r in hist_products)} szt. • wartość {total_value(hist_products):.0f} zł")
+            if st.button("🗑️ Usuń wybraną paletę", use_container_width=True):
+                if len(pallets)>1:
+                    delete_pallet(conn, selected_id); st.session_state.current_pallet_id=int(pallets[pallets['id']!=selected_id].iloc[0]['id']); st.session_state.pending=None; st.rerun()
+                else: st.warning("Nie można usunąć jedynej palety.")
+            st.divider(); st.write("**Status API:**")
+            if get_client():
+                st.success("OPENAI_API_KEY ustawiony")
+            else:
+                st.error("Brak OPENAI_API_KEY")
+    st.title("📦 Paletownia")
+    st.subheader(f"🗂️ {current['name']}")
+    total=total_value(products); units=sum(int(r['Ilość']) for r in products)
+    m1,m2,m3,m4=st.columns(4); m1.metric("Pozycje",len(products)); m2.metric("Sztuki",units); m3.metric("Wartość palety",f"{total:,.0f} zł"); m4.metric("Nadwyżka",f"{total-float(current['cost']):,.0f} zł")
 
-    # Kompaktowy widok: karty w siatce + paginacja. Szczegóły edycji są zwinięte.
-    st.markdown("""
-    <style>
-    .product-card-compact {
-        border:1px solid #e5e7eb; border-radius:14px; padding:10px;
-        margin:5px 0 10px 0; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.05);
-        min-height:250px;
-    }
-    .compact-name { font-size:.96rem; font-weight:750; line-height:1.2; min-height:42px; }
-    .compact-price { font-size:1.12rem; font-weight:800; margin:3px 0; }
-    .compact-meta { color:#6b7280; font-size:.78rem; line-height:1.3; }
-    .level-badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:.72rem; font-weight:700; margin:2px 0; }
-    .lvl1 { background:#fff1bf; color:#6b5200; }
-    .lvl2 { background:#dcfce7; color:#166534; }
-    .lvl3 { background:#ffedd5; color:#9a3412; }
-    .lvl4 { background:#fee2e2; color:#991b1b; }
-    @media (max-width: 900px) {
-      .compact-name { font-size:.9rem; }
-      .product-card-compact { min-height:235px; }
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    st.divider(); st.subheader("📋 Zawartość palety")
 
-    def level_css(label):
-        if "Priorytet" in label: return "lvl1"
-        if "Ważne" in label: return "lvl2"
-        if "Mogą poczekać" in label: return "lvl3"
-        return "lvl4"
+    sort_choice_mobile = st.selectbox(
+        "Sortowanie",
+        [
+            "Data dodania — najnowsze",
+            "Data dodania — najstarsze",
+            "Nazwa A–Z",
+            "Nazwa Z–A",
+            "Wartość — od najwyższej",
+            "Wartość — od najniższej",
+        ],
+        key="sort_choice_mobile",
+    )
 
-    @st.fragment
-    def render_product_card(product_id):
-        r = load_product_by_id(conn, product_id)
-        if r is None:
-            return
-
-        level = level_label(float(r["Realna cena sprzedaży"]))
-        cls = level_css(level)
-        name = " ".join(
+    def _product_name_for_sort(r):
+        return " ".join(
             str(x).strip()
             for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")]
             if str(x).strip()
-        )
-        thumb = str(r.get("Miniatura") or "")
-        status = str(r.get("Status sprzedaży") or "Na stanie")
-        status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
+        ).lower()
 
-        with st.container(border=True):
-            if thumb:
-                st.image(thumb, width="stretch")
-            else:
+    def _product_value_for_sort(r):
+        return float(r.get("Ilość", 1) or 1) * float(r.get("Realna cena sprzedaży", 0) or 0)
+
+    def _product_date_for_sort(r):
+        # load_products returns created_at when available; fallback keeps stable order.
+        return str(r.get("created_at", r.get("Data dodania", "")) or "")
+
+    if products:
+        if sort_choice_mobile == "Nazwa A–Z":
+            products = sorted(products, key=_product_name_for_sort)
+        elif sort_choice_mobile == "Nazwa Z–A":
+            products = sorted(products, key=_product_name_for_sort, reverse=True)
+        elif sort_choice_mobile == "Wartość — od najwyższej":
+            products = sorted(products, key=_product_value_for_sort, reverse=True)
+        elif sort_choice_mobile == "Wartość — od najniższej":
+            products = sorted(products, key=_product_value_for_sort)
+        elif sort_choice_mobile == "Data dodania — najstarsze":
+            products = sorted(products, key=_product_date_for_sort)
+        else:
+            products = sorted(products, key=_product_date_for_sort, reverse=True)
+    if products:
+        sold_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Sprzedany"]
+        listed_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") == "Wystawiony"]
+        available_rows = [r for r in products if str(r.get("Status sprzedaży") or "Na stanie") != "Sprzedany"]
+        sm1, sm2, sm3 = st.columns(3)
+        with sm1: st.metric("🟢 Wystawione", len(listed_rows))
+        with sm2: st.metric("🔴 Sprzedane", len(sold_rows))
+        with sm3: st.metric("💰 Przychód ze sprzedanych", f"{sum(float(r.get('Cena sprzedaży',0) or 0) for r in sold_rows):.0f} zł")
+        # Mobile-first card view: much easier to scan on a phone than a wide dataframe.
+        st.markdown("""
+        <style>
+        .product-card { border:1px solid #e5e7eb; border-radius:16px; padding:12px; margin:8px 0; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.05); }
+        .product-name { font-size:1.02rem; font-weight:700; line-height:1.25; margin-bottom:5px; }
+        .product-meta { color:#6b7280; font-size:.86rem; line-height:1.35; }
+        .product-price { font-size:1.18rem; font-weight:800; margin-top:5px; }
+        .level-badge { display:inline-block; padding:4px 9px; border-radius:999px; font-size:.78rem; font-weight:700; margin:2px 0 4px; }
+        .lvl1 { background:#fff1bf; color:#6b5200; }
+        .lvl2 { background:#dcfce7; color:#166534; }
+        .lvl3 { background:#ffedd5; color:#9a3412; }
+        .lvl4 { background:#fee2e2; color:#991b1b; }
+        @media (max-width: 640px) {
+          .product-card { padding:10px; border-radius:14px; }
+          .product-name { font-size:.98rem; }
+          .product-price { font-size:1.1rem; }
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        def level_css(label):
+            if "Priorytet" in label: return "lvl1"
+            if "Ważne" in label: return "lvl2"
+            if "Mogą poczekać" in label: return "lvl3"
+            return "lvl4"
+
+        # Kompaktowy widok: karty w siatce + paginacja. Szczegóły edycji są zwinięte.
+        st.markdown("""
+        <style>
+        .product-card-compact {
+            border:1px solid #e5e7eb; border-radius:14px; padding:10px;
+            margin:5px 0 10px 0; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.05);
+            min-height:250px;
+        }
+        .compact-name { font-size:.96rem; font-weight:750; line-height:1.2; min-height:42px; }
+        .compact-price { font-size:1.12rem; font-weight:800; margin:3px 0; }
+        .compact-meta { color:#6b7280; font-size:.78rem; line-height:1.3; }
+        .level-badge { display:inline-block; padding:3px 8px; border-radius:999px; font-size:.72rem; font-weight:700; margin:2px 0; }
+        .lvl1 { background:#fff1bf; color:#6b5200; }
+        .lvl2 { background:#dcfce7; color:#166534; }
+        .lvl3 { background:#ffedd5; color:#9a3412; }
+        .lvl4 { background:#fee2e2; color:#991b1b; }
+        @media (max-width: 900px) {
+          .compact-name { font-size:.9rem; }
+          .product-card-compact { min-height:235px; }
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        def level_css(label):
+            if "Priorytet" in label: return "lvl1"
+            if "Ważne" in label: return "lvl2"
+            if "Mogą poczekać" in label: return "lvl3"
+            return "lvl4"
+
+        @st.fragment
+        def render_product_card(product_id):
+            r = load_product_by_id(conn, product_id)
+            if r is None:
+                return
+
+            level = level_label(float(r["Realna cena sprzedaży"]))
+            cls = level_css(level)
+            name = " ".join(
+                str(x).strip()
+                for x in [r.get("Marka", ""), r.get("Produkt", ""), r.get("Model", "")]
+                if str(x).strip()
+            )
+            thumb = str(r.get("Miniatura") or "")
+            status = str(r.get("Status sprzedaży") or "Na stanie")
+            status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
+
+            with st.container(border=True):
+                if thumb:
+                    st.image(thumb, width="stretch")
+                else:
+                    st.markdown(
+                        '<div style="height:125px;display:flex;align-items:center;justify-content:center;'
+                        'border:1px dashed #cbd5e1;border-radius:10px;color:#94a3b8;font-size:30px;">📷</div>',
+                        unsafe_allow_html=True
+                    )
+
+                st.markdown(f'<div class="compact-name">{int(r["Lp."])}. {escape(name)}</div>', unsafe_allow_html=True)
+                st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
+                st.markdown(f'<div class="compact-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>', unsafe_allow_html=True)
                 st.markdown(
-                    '<div style="height:125px;display:flex;align-items:center;justify-content:center;'
-                    'border:1px dashed #cbd5e1;border-radius:10px;color:#94a3b8;font-size:30px;">📷</div>',
+                    f'<div class="compact-meta">Ilość: <b>{int(r["Ilość"])}</b> · {status_icon} {escape(status)}</div>',
                     unsafe_allow_html=True
                 )
+                if status == "Sprzedany":
+                    st.caption(f'Sprzedano za {float(r.get("Cena sprzedaży",0) or 0):.0f} zł')
 
-            st.markdown(f'<div class="compact-name">{int(r["Lp."])}. {escape(name)}</div>', unsafe_allow_html=True)
-            st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
-            st.markdown(f'<div class="compact-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="compact-meta">Ilość: <b>{int(r["Ilość"])}</b> · {status_icon} {escape(status)}</div>',
-                unsafe_allow_html=True
-            )
-            if status == "Sprzedany":
-                st.caption(f'Sprzedano za {float(r.get("Cena sprzedaży",0) or 0):.0f} zł')
+                if str(r.get("Link do oferty") or "").strip():
+                    try:
+                        st.link_button("🔗 Oferta", str(r["Link do oferty"]), use_container_width=True)
+                    except Exception:
+                        st.markdown(f'[🔗 Oferta]({r["Link do oferty"]})')
 
-            if str(r.get("Link do oferty") or "").strip():
-                try:
-                    st.link_button("🔗 Oferta", str(r["Link do oferty"]), use_container_width=True)
-                except Exception:
-                    st.markdown(f'[🔗 Oferta]({r["Link do oferty"]})')
+                with st.expander("✏️ Edytuj", expanded=False):
+                    with st.form(key=f"product_edit_form_{product_id}", clear_on_submit=False):
+                        new_product_name = st.text_input(
+                            "Nazwa produktu", value=str(r.get("Produkt", "") or ""),
+                            key=f"card_edit_product_{product_id}"
+                        )
+                        e1, e2 = st.columns(2)
+                        with e1:
+                            new_qty = st.number_input("Ilość", min_value=1, value=int(r["Ilość"]), step=1, key=f"card_edit_qty_{product_id}")
+                        with e2:
+                            new_real = st.number_input("Realna sprzedaż / szt.", min_value=0.0, value=float(r["Realna cena sprzedaży"]), step=5.0, key=f"card_edit_real_{product_id}")
+                        new_listing = st.number_input("Cena wystawienia", min_value=0.0, value=float(r["Cena wystawienia"]), step=5.0, key=f"card_edit_listing_{product_id}")
 
-            with st.expander("✏️ Edytuj", expanded=False):
-                with st.form(key=f"product_edit_form_{product_id}", clear_on_submit=False):
-                    new_product_name = st.text_input(
-                        "Nazwa produktu", value=str(r.get("Produkt", "") or ""),
-                        key=f"card_edit_product_{product_id}"
-                    )
-                    e1, e2 = st.columns(2)
-                    with e1:
-                        new_qty = st.number_input("Ilość", min_value=1, value=int(r["Ilość"]), step=1, key=f"card_edit_qty_{product_id}")
-                    with e2:
-                        new_real = st.number_input("Realna sprzedaż / szt.", min_value=0.0, value=float(r["Realna cena sprzedaży"]), step=5.0, key=f"card_edit_real_{product_id}")
-                    new_listing = st.number_input("Cena wystawienia", min_value=0.0, value=float(r["Cena wystawienia"]), step=5.0, key=f"card_edit_listing_{product_id}")
+                        st.markdown("**📦 Wymiary paczki / wysyłka**")
+                        p1, p2 = st.columns(2)
+                        with p1:
+                            pkg_l = st.number_input("Długość (cm)", min_value=0.0, value=float(r.get("Długość paczki", 0)), step=0.5, key=f"pkg_l_{product_id}")
+                            pkg_h = st.number_input("Wysokość (cm)", min_value=0.0, value=float(r.get("Wysokość paczki", 0)), step=0.5, key=f"pkg_h_{product_id}")
+                        with p2:
+                            pkg_w = st.number_input("Szerokość (cm)", min_value=0.0, value=float(r.get("Szerokość paczki", 0)), step=0.5, key=f"pkg_w_{product_id}")
+                            pkg_weight = st.number_input("Waga (kg)", min_value=0.0, value=float(r.get("Waga paczki", 0)), step=0.1, key=f"pkg_weight_{product_id}")
 
-                    st.markdown("**📦 Wymiary paczki / wysyłka**")
-                    p1, p2 = st.columns(2)
-                    with p1:
-                        pkg_l = st.number_input("Długość (cm)", min_value=0.0, value=float(r.get("Długość paczki", 0)), step=0.5, key=f"pkg_l_{product_id}")
-                        pkg_h = st.number_input("Wysokość (cm)", min_value=0.0, value=float(r.get("Wysokość paczki", 0)), step=0.5, key=f"pkg_h_{product_id}")
-                    with p2:
-                        pkg_w = st.number_input("Szerokość (cm)", min_value=0.0, value=float(r.get("Szerokość paczki", 0)), step=0.5, key=f"pkg_w_{product_id}")
-                        pkg_weight = st.number_input("Waga (kg)", min_value=0.0, value=float(r.get("Waga paczki", 0)), step=0.1, key=f"pkg_weight_{product_id}")
+                        if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
+                            pdims, pops = best_shipping_options(pkg_l, pkg_w, pkg_h, pkg_weight)
+                            st.caption(f"📐 Po dodaniu +2 cm: **{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**")
+                            st.caption(" • ".join(f"{k}: **{v or 'poza automatem'}**" for k, v in pops.items()))
 
-                    if pkg_l > 0 and pkg_w > 0 and pkg_h > 0:
-                        pdims, pops = best_shipping_options(pkg_l, pkg_w, pkg_h, pkg_weight)
-                        st.caption(f"📐 Po dodaniu +2 cm: **{pdims[0]:g} × {pdims[1]:g} × {pdims[2]:g} cm**")
-                        st.caption(" • ".join(f"{k}: **{v or 'poza automatem'}**" for k, v in pops.items()))
+                        new_offer = st.text_input(
+                            "Link do przykładowej oferty", value=str(r.get("Link do oferty", "") or ""),
+                            key=f"card_edit_offer_{product_id}"
+                        )
+                        current_status = str(r.get("Status sprzedaży") or "Na stanie")
+                        manual_status = st.selectbox(
+                            "Status", ["Na stanie", "Wystawiony", "Sprzedany"],
+                            index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
+                            key=f"manual_sale_status_{product_id}"
+                        )
+                        manual_sold_price = (
+                            st.number_input("Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży", 0) or 0), step=5.0, key=f"manual_sold_price_{product_id}")
+                            if manual_status == "Sprzedany" else 0.0
+                        )
+                        save_clicked = st.form_submit_button("💾 Zapisz zmiany", use_container_width=True, type="primary")
 
-                    new_offer = st.text_input(
-                        "Link do przykładowej oferty", value=str(r.get("Link do oferty", "") or ""),
-                        key=f"card_edit_offer_{product_id}"
-                    )
-                    current_status = str(r.get("Status sprzedaży") or "Na stanie")
-                    manual_status = st.selectbox(
-                        "Status", ["Na stanie", "Wystawiony", "Sprzedany"],
-                        index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
-                        key=f"manual_sale_status_{product_id}"
-                    )
-                    manual_sold_price = (
-                        st.number_input("Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży", 0) or 0), step=5.0, key=f"manual_sold_price_{product_id}")
-                        if manual_status == "Sprzedany" else 0.0
-                    )
-                    save_clicked = st.form_submit_button("💾 Zapisz zmiany", use_container_width=True, type="primary")
-
-                if save_clicked:
-                    update_product(conn, product_id, new_qty, new_real, new_listing, None, new_offer, new_product_name, pkg_l, pkg_w, pkg_h, pkg_weight)
-                    update_sale_status(conn, product_id, manual_status, manual_sold_price)
-                    st.success("✅ Zapisano zmiany.")
-                    st.rerun(scope="fragment")
-
-            with st.popover("🖼️ Zdjęcie", use_container_width=True):
-                st.write(f"**{name}**")
-                photo = st.file_uploader(
-                    "Wybierz nowe zdjęcie", type=["jpg", "jpeg", "png", "webp"],
-                    key=f"card_photo_{product_id}", label_visibility="collapsed"
-                )
-                if photo is not None:
-                    new_thumb = make_thumbnail_data_url(photo.getvalue())
-                    if new_thumb:
-                        update_product_thumbnail(conn, product_id, new_thumb, replace=True)
-                        st.success("Zdjęcie zapisane.")
+                    if save_clicked:
+                        update_product(conn, product_id, new_qty, new_real, new_listing, None, new_offer, new_product_name, pkg_l, pkg_w, pkg_h, pkg_weight)
+                        update_sale_status(conn, product_id, manual_status, manual_sold_price)
+                        st.success("✅ Zapisano zmiany.")
                         st.rerun(scope="fragment")
 
-            if st.button("🗑️ Usuń", key=f"card_delete_{product_id}", use_container_width=True):
-                delete_product(conn, product_id)
+                with st.popover("🖼️ Zdjęcie", use_container_width=True):
+                    st.write(f"**{name}**")
+                    photo = st.file_uploader(
+                        "Wybierz nowe zdjęcie", type=["jpg", "jpeg", "png", "webp"],
+                        key=f"card_photo_{product_id}", label_visibility="collapsed"
+                    )
+                    if photo is not None:
+                        new_thumb = make_thumbnail_data_url(photo.getvalue())
+                        if new_thumb:
+                            update_product_thumbnail(conn, product_id, new_thumb, replace=True)
+                            st.success("Zdjęcie zapisane.")
+                            st.rerun(scope="fragment")
+
+                if st.button("🗑️ Usuń", key=f"card_delete_{product_id}", use_container_width=True):
+                    delete_product(conn, product_id)
+                    st.rerun()
+
+        # Paginacja: na jednej stronie maksymalnie 20 produktów.
+        page_size_options = [12, 24, 48]
+        pc1, pc2, pc3 = st.columns([1.3, 1.3, 2.4])
+        with pc1:
+            page_size = st.selectbox("Na stronę", page_size_options, index=1, key="products_page_size")
+        total_products = len(products)
+        total_pages = max(1, (total_products + page_size - 1) // page_size)
+        current_page = min(max(int(st.session_state.get("products_page", 1)), 1), total_pages)
+        with pc2:
+            page_selected = st.number_input("Strona", min_value=1, max_value=total_pages, value=current_page, step=1, key="products_page_input")
+            if int(page_selected) != current_page:
+                st.session_state.products_page = int(page_selected)
                 st.rerun()
+        with pc3:
+            start_idx = (current_page - 1) * page_size
+            end_idx = min(start_idx + page_size, total_products)
+            st.caption(f"Wyświetlam **{start_idx + 1}–{end_idx}** z **{total_products}** produktów")
 
-    # Paginacja: na jednej stronie maksymalnie 20 produktów.
-    page_size_options = [12, 24, 48]
-    pc1, pc2, pc3 = st.columns([1.3, 1.3, 2.4])
-    with pc1:
-        page_size = st.selectbox("Na stronę", page_size_options, index=1, key="products_page_size")
-    total_products = len(products)
-    total_pages = max(1, (total_products + page_size - 1) // page_size)
-    current_page = min(max(int(st.session_state.get("products_page", 1)), 1), total_pages)
-    with pc2:
-        page_selected = st.number_input("Strona", min_value=1, max_value=total_pages, value=current_page, step=1, key="products_page_input")
-        if int(page_selected) != current_page:
-            st.session_state.products_page = int(page_selected)
-            st.rerun()
-    with pc3:
-        start_idx = (current_page - 1) * page_size
-        end_idx = min(start_idx + page_size, total_products)
-        st.caption(f"Wyświetlam **{start_idx + 1}–{end_idx}** z **{total_products}** produktów")
+        page_products = products[start_idx:end_idx]
+        grid_cols = st.columns(4)
+        for idx, r in enumerate(page_products):
+            with grid_cols[idx % 4]:
+                render_product_card(r["_db_id"])
 
-    page_products = products[start_idx:end_idx]
-    grid_cols = st.columns(4)
-    for idx, r in enumerate(page_products):
-        with grid_cols[idx % 4]:
-            render_product_card(r["_db_id"])
+        nav1, nav2, nav3, nav4, nav5 = st.columns([1, 1, 2, 1, 1])
+        with nav1:
+            if st.button("⏮️", disabled=current_page <= 1, key="page_first", use_container_width=True):
+                st.session_state.products_page = 1; st.rerun()
+        with nav2:
+            if st.button("◀️", disabled=current_page <= 1, key="page_prev", use_container_width=True):
+                st.session_state.products_page = current_page - 1; st.rerun()
+        with nav3:
+            st.markdown(f"<div style='text-align:center;padding:8px;font-weight:700;'>Strona {current_page} z {total_pages}</div>", unsafe_allow_html=True)
+        with nav4:
+            if st.button("▶️", disabled=current_page >= total_pages, key="page_next", use_container_width=True):
+                st.session_state.products_page = current_page + 1; st.rerun()
+        with nav5:
+            if st.button("⏭️", disabled=current_page >= total_pages, key="page_last", use_container_width=True):
+                st.session_state.products_page = total_pages; st.rerun()
 
-    nav1, nav2, nav3, nav4, nav5 = st.columns([1, 1, 2, 1, 1])
-    with nav1:
-        if st.button("⏮️", disabled=current_page <= 1, key="page_first", use_container_width=True):
-            st.session_state.products_page = 1; st.rerun()
-    with nav2:
-        if st.button("◀️", disabled=current_page <= 1, key="page_prev", use_container_width=True):
-            st.session_state.products_page = current_page - 1; st.rerun()
-    with nav3:
-        st.markdown(f"<div style='text-align:center;padding:8px;font-weight:700;'>Strona {current_page} z {total_pages}</div>", unsafe_allow_html=True)
-    with nav4:
-        if st.button("▶️", disabled=current_page >= total_pages, key="page_next", use_container_width=True):
-            st.session_state.products_page = current_page + 1; st.rerun()
-    with nav5:
-        if st.button("⏭️", disabled=current_page >= total_pages, key="page_last", use_container_width=True):
-            st.session_state.products_page = total_pages; st.rerun()
+        st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
 
-    st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
+        with st.expander("🖼️ Zdjęcia produktów", expanded=False):
+            st.caption("Miniatury są zapisane w bazie. Produkty bez zdjęcia możesz uzupełnić przyciskiem ➕ na karcie produktu.")
+            for r in products:
+                photo_col, name_col, info_col = st.columns([0.7, 4.8, 2.5])
+                with photo_col:
+                    thumb = str(r.get("Miniatura") or "")
+                    if thumb:
+                        st.image(thumb, width=58)
+                    else:
+                        st.caption("brak")
+                with name_col:
+                    st.markdown(f"**{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}**")
+                with info_col:
+                    st.caption(f"Realna sprzedaż: {float(r['Realna cena sprzedaży']):.0f} zł • Ilość: {int(r['Ilość'])}")
 
-    with st.expander("🖼️ Zdjęcia produktów", expanded=False):
-        st.caption("Miniatury są zapisane w bazie. Produkty bez zdjęcia możesz uzupełnić przyciskiem ➕ na karcie produktu.")
-        for r in products:
-            photo_col, name_col, info_col = st.columns([0.7, 4.8, 2.5])
-            with photo_col:
-                thumb = str(r.get("Miniatura") or "")
-                if thumb:
-                    st.image(thumb, width=58)
-                else:
-                    st.caption("brak")
-            with name_col:
-                st.markdown(f"**{r['Lp.']}. {r['Marka']} {r['Produkt']} {r['Model']}**")
-            with info_col:
-                st.caption(f"Realna sprzedaż: {float(r['Realna cena sprzedaży']):.0f} zł • Ilość: {int(r['Ilość'])}")
+    else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
 
-else: st.info("Paleta jest pusta. Zrób pierwsze zdjęcie produktu.")
+    if products:
+        st.divider()
+        with st.expander("📦 Kartony i wysyłka — analiza całej bazy", expanded=False):
+            all_pack = load_all_packaging(conn)
+            if not all_pack:
+                st.info("Dodaj wymiary paczek przy produktach, aby Paletownia mogła policzyć gabaryty i zapotrzebowanie na kartony.")
+            else:
+                st.caption("Wpisujesz rzeczywiste wymiary mierzonego pakunku/produktu. Paletownia automatycznie dodaje **2 cm do każdego wymiaru** jako zapas na wypełnienie i dopiero tak powiększone wymiary porównuje z limitami przewoźników.")
 
-if products:
-    st.divider()
-    with st.expander("📦 Kartony i wysyłka — analiza całej bazy", expanded=False):
-        all_pack = load_all_packaging(conn)
-        if not all_pack:
-            st.info("Dodaj wymiary paczek przy produktach, aby Paletownia mogła policzyć gabaryty i zapotrzebowanie na kartony.")
-        else:
-            st.caption("Wpisujesz rzeczywiste wymiary mierzonego pakunku/produktu. Paletownia automatycznie dodaje **2 cm do każdego wymiaru** jako zapas na wypełnienie i dopiero tak powiększone wymiary porównuje z limitami przewoźników.")
+                rows=[]
+                carrier_counts={k:{"A":0,"B":0,"C":0} for k in CARRIER_LIMITS}
+                courier_needed=0
+                for r in all_pack:
+                    dims,opts=best_shipping_options(r["package_l"],r["package_w"],r["package_h"],r.get("package_weight",0))
+                    qty=max(1,int(r.get("quantity") or 1))
+                    rows.extend([dims] * qty)
+                    for carrier, gab in opts.items():
+                        if gab:
+                            carrier_counts[carrier][gab] += qty
+                    if not any(opts.values()):
+                        courier_needed += qty
 
-            rows=[]
-            carrier_counts={k:{"A":0,"B":0,"C":0} for k in CARRIER_LIMITS}
-            courier_needed=0
-            for r in all_pack:
-                dims,opts=best_shipping_options(r["package_l"],r["package_w"],r["package_h"],r.get("package_weight",0))
-                qty=max(1,int(r.get("quantity") or 1))
-                rows.extend([dims] * qty)
-                for carrier, gab in opts.items():
-                    if gab:
-                        carrier_counts[carrier][gab] += qty
-                if not any(opts.values()):
-                    courier_needed += qty
+                st.markdown("### 📊 Jakich kartonów potrzebujesz najczęściej?")
+                counts=pd.Series([tuple(round(x,1) for x in d) for d in rows]).value_counts()
+                for dims,count in counts.head(10).items():
+                    st.write(f"📦 **{dims[0]:g} × {dims[1]:g} × {dims[2]:g} cm** — **{int(count)} szt.**")
 
-            st.markdown("### 📊 Jakich kartonów potrzebujesz najczęściej?")
-            counts=pd.Series([tuple(round(x,1) for x in d) for d in rows]).value_counts()
-            for dims,count in counts.head(10).items():
-                st.write(f"📦 **{dims[0]:g} × {dims[1]:g} × {dims[2]:g} cm** — **{int(count)} szt.**")
+                st.markdown("### 🚚 W jakich automatach zmieszczą się paczki?")
+                c1,c2,c3,c4=st.columns(4)
+                c1.metric("InPost", sum(carrier_counts["InPost"].values()))
+                c2.metric("DPD automat", sum(carrier_counts["DPD automat"].values()))
+                c3.metric("ORLEN Paczka", sum(carrier_counts["ORLEN Paczka"].values()))
+                c4.metric("Poza automatami", courier_needed)
 
-            st.markdown("### 🚚 W jakich automatach zmieszczą się paczki?")
-            c1,c2,c3,c4=st.columns(4)
-            c1.metric("InPost", sum(carrier_counts["InPost"].values()))
-            c2.metric("DPD automat", sum(carrier_counts["DPD automat"].values()))
-            c3.metric("ORLEN Paczka", sum(carrier_counts["ORLEN Paczka"].values()))
-            c4.metric("Poza automatami", courier_needed)
+                st.markdown("**Najmniejszy dostępny gabaryt dla każdego przewoźnika:**")
+                for carrier in CARRIER_LIMITS:
+                    counts_c=carrier_counts[carrier]
+                    best=next((g for g in ["A","B","C"] if counts_c[g]), "—")
+                    st.caption(f"{carrier}: **{best}** — A: {counts_c['A']} szt. • B: {counts_c['B']} szt. • C: {counts_c['C']} szt.")
 
-            st.markdown("**Najmniejszy dostępny gabaryt dla każdego przewoźnika:**")
-            for carrier in CARRIER_LIMITS:
-                counts_c=carrier_counts[carrier]
-                best=next((g for g in ["A","B","C"] if counts_c[g]), "—")
-                st.caption(f"{carrier}: **{best}** — A: {counts_c['A']} szt. • B: {counts_c['B']} szt. • C: {counts_c['C']} szt.")
+                st.markdown("### 📋 Produkty wymagające największych kartonów / kuriera")
+                for r in all_pack:
+                    dims,opts=best_shipping_options(r["package_l"],r["package_w"],r["package_h"],r.get("package_weight",0))
+                    if not any(opts.values()):
+                        name=f"{r['brand']} {r['product']} {r['model']}".strip()
+                        st.warning(f"{name} — {dims[0]:g} × {dims[1]:g} × {dims[2]:g} cm po dodaniu zapasu. **Nie mieści się w automatach InPost, DPD ani ORLEN Paczka** — potrzebny kurier / inna usługa.")
 
-            st.markdown("### 📋 Produkty wymagające największych kartonów / kuriera")
-            for r in all_pack:
-                dims,opts=best_shipping_options(r["package_l"],r["package_w"],r["package_h"],r.get("package_weight",0))
-                if not any(opts.values()):
-                    name=f"{r['brand']} {r['product']} {r['model']}".strip()
-                    st.warning(f"{name} — {dims[0]:g} × {dims[1]:g} × {dims[2]:g} cm po dodaniu zapasu. **Nie mieści się w automatach InPost, DPD ani ORLEN Paczka** — potrzebny kurier / inna usługa.")
+                st.caption("Dopasowanie uwzględnia obrót prostopadłościanu, tak aby wymiary mogły zostać ustawione w najbardziej korzystnej orientacji. Limity wagowe są sprawdzane, jeśli podasz wagę paczki.")
 
-            st.caption("Dopasowanie uwzględnia obrót prostopadłościanu, tak aby wymiary mogły zostać ustawione w najbardziej korzystnej orientacji. Limity wagowe są sprawdzane, jeśli podasz wagę paczki.")
-
-    st.divider(); st.subheader("📥 Eksport")
-    excel=make_excel(products,str(current['name']),float(current['cost']))
-    safe=re.sub(r"[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ _-]+","",str(current['name'])).strip().replace(' ','_') or 'paleta'
-    st.download_button("📊 Pobierz Excel",data=excel,file_name=f"{safe}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
-    st.caption("Dane są zapisane w zewnętrznej bazie PostgreSQL i są wspólne dla urządzeń.")
+        st.divider(); st.subheader("📥 Eksport")
+        excel=make_excel(products,str(current['name']),float(current['cost']))
+        safe=re.sub(r"[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ _-]+","",str(current['name'])).strip().replace(' ','_') or 'paleta'
+        st.download_button("📊 Pobierz Excel",data=excel,file_name=f"{safe}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+        st.caption("Dane są zapisane w zewnętrznej bazie PostgreSQL i są wspólne dla urządzeń.")
