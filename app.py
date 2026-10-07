@@ -19,9 +19,9 @@ from PIL import Image
 
 st.set_page_config(page_title="Paletownia", page_icon="📦", layout="wide")
 
-# CookieManager jest widgetem Streamlit — musi być tworzony poza @st.cache_* .
-# Jedna instancja na uruchomienie aplikacji wystarcza do odczytu/zapisu trwałego logowania.
-cookie_manager = stx.CookieManager()
+# CookieManager jest widgetem Streamlit. Nie wolno go cache'ować ani trzymać
+# jako globalnej instancji współdzielonej przez sesje użytkowników.
+# Tworzymy go raz na sesję przeglądarki i przechowujemy w session_state.
 
 # Paletownia PWA metadata
 st.markdown(
@@ -520,33 +520,55 @@ def admin_session_token():
     return hmac.new(secret.encode("utf-8"), b"paletownia-admin-v1", hashlib.sha256).hexdigest()
 
 
+def get_cookie_manager():
+    """Zwraca CookieManager tylko wtedy, gdy trzeba zapisać/usunąć cookie."""
+    if "_paletownia_cookie_manager" not in st.session_state:
+        st.session_state["_paletownia_cookie_manager"] = stx.CookieManager(
+            key="paletownia_cookie_manager"
+        )
+    return st.session_state["_paletownia_cookie_manager"]
+
+
 def persistent_admin_login():
-    """Odtwarza logowanie z trwałego cookie przeglądarki."""
+    """Odtwarza logowanie z cookie otrzymanego przy wejściu do aplikacji.
+
+    Ważne: do ODCZYTU po F5 nie używamy CookieManager.get()/get_all().
+    Streamlit udostępnia cookies z pierwotnego requestu przez st.context.cookies,
+    więc odczyt nie zależy od asynchronicznego cyklu customowego komponentu.
+    """
     try:
-        manager = cookie_manager
-        token = manager.get(cookie="paletownia_admin")
         expected = admin_session_token()
-        if token and expected and hmac.compare_digest(str(token), expected):
+        if not expected:
+            return
+
+        cookies = st.context.cookies
+        token = cookies.get("paletownia_admin") if cookies else None
+        if token and hmac.compare_digest(str(token), expected):
             st.session_state.admin_logged_in = True
     except Exception:
-        # Brak/awaria komponentu cookie nie blokuje zwykłego logowania PIN-em.
+        # Jeśli dana wersja Streamlit nie udostępnia context.cookies,
+        # zwykłe logowanie PIN-em nadal działa.
         pass
 
 
 def persist_admin_login():
-    manager = cookie_manager
+    manager = get_cookie_manager()
     token = admin_session_token()
     if token:
         manager.set(
             "paletownia_admin",
             token,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            key="paletownia_admin_set",
+            path="/",
+            max_age=30 * 24 * 60 * 60,
+            secure=True,
+            same_site="lax",
         )
 
 
 def clear_persistent_admin_login():
     try:
-        cookie_manager.delete("paletownia_admin")
+        get_cookie_manager().delete("paletownia_admin", key="paletownia_admin_delete")
     except Exception:
         pass
 
@@ -609,10 +631,10 @@ if not st.session_state.admin_logged_in:
                 st.session_state.admin_logged_in = True
                 st.session_state.admin_login_error = False
                 persist_admin_login()
-                # CookieManager zapisuje cookie po stronie przeglądarki asynchronicznie.
-                # Dajemy komponentowi chwilę na wykonanie zapisu przed rerunem.
-                time.sleep(1.5)
-                st.rerun()
+                # Nie robimy tutaj ręcznego st.rerun().
+                # CookieManager musi dostać możliwość wykonania operacji w przeglądarce;
+                # jego własny cykl komponentu obsłuży kolejne odświeżenie.
+                time.sleep(1.0)
             else:
                 st.session_state.admin_login_error = True
                 st.error("Nieprawidłowy PIN.")
