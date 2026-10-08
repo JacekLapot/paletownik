@@ -161,8 +161,12 @@ def db_conn():
 
 
 def db_init(conn):
-    if st.session_state.get("_db_initialized"):
-        return
+    # Migracje schematu muszą być sprawdzane również w istniejącej sesji.
+    # Wcześniej _db_initialized mogło mieć wartość True z czasu, gdy baza
+    # nie miała jeszcze kolumny listing_platform, przez co ALTER TABLE nie
+    # wykonywał się po aktualizacji aplikacji. Wszystkie polecenia poniżej
+    # są idempotentne (IF NOT EXISTS), więc można je bezpiecznie sprawdzać
+    # przy każdym uruchomieniu aplikacji.
     with conn.session as s:
         for statement in [x.strip() for x in DB_DDL.split(';') if x.strip()]:
             s.execute(text(statement))
