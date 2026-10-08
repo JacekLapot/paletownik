@@ -43,7 +43,7 @@ FIELDS = [
     "Lp.", "Ilość", "Kategoria", "Marka", "Produkt", "Model", "Stan",
     "Kompletność", "Cena nowego", "Cena używanego", "Realna cena sprzedaży",
     "Cena wystawienia", "Źródło ceny", "Link do oferty", "Uwagi", "Priorytet",
-    "Status sprzedaży", "Cena sprzedaży", "Data wystawienia", "Data sprzedaży",
+    "Status sprzedaży", "Platforma wystawienia", "Cena sprzedaży", "Data wystawienia", "Data sprzedaży",
     "Długość paczki", "Szerokość paczki", "Wysokość paczki", "Waga paczki"
 ]
 PRIORITIES = ["🟡 Priorytet", "🟢 Ważne", "🟠 Mogą poczekać", "🔴 Badziew"]
@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS products (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     image_thumb TEXT NOT NULL DEFAULT '',
     sale_status TEXT NOT NULL DEFAULT 'Na stanie',
+    listing_platform TEXT NOT NULL DEFAULT '',
     sold_price NUMERIC(12,2) NOT NULL DEFAULT 0,
     listed_at TIMESTAMPTZ NULL,
     sold_at TIMESTAMPTZ NULL,
@@ -138,6 +139,7 @@ CREATE TABLE IF NOT EXISTS products (
 );
 ALTER TABLE products ADD COLUMN IF NOT EXISTS image_thumb TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sale_status TEXT NOT NULL DEFAULT 'Na stanie';
+ALTER TABLE products ADD COLUMN IF NOT EXISTS listing_platform TEXT NOT NULL DEFAULT '';
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_price NUMERIC(12,2) NOT NULL DEFAULT 0;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS listed_at TIMESTAMPTZ NULL;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS sold_at TIMESTAMPTZ NULL;
@@ -224,7 +226,7 @@ def load_products(conn, pallet_id):
            new_price AS \"Cena nowego\", used_price AS \"Cena używanego\", real_sale_price AS \"Realna cena sprzedaży\",
            listing_price AS \"Cena wystawienia\", price_source AS \"Źródło ceny\", offer_link AS \"Link do oferty\",
            notes AS \"Uwagi\", priority AS \"Priorytet\", image_thumb AS \"Miniatura\",
-           sale_status AS \"Status sprzedaży\", sold_price AS \"Cena sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\",
+           sale_status AS \"Status sprzedaży\", listing_platform AS \"Platforma wystawienia\", sold_price AS \"Cena sprzedaży\", listed_at AS \"Data wystawienia\", sold_at AS \"Data sprzedaży\", created_at AS \"Data dodania\",
            package_l AS \"Długość paczki\", package_w AS \"Szerokość paczki\", package_h AS \"Wysokość paczki\", package_weight AS \"Waga paczki\"
     FROM products WHERE pallet_id = :pallet_id ORDER BY position, id
     """
@@ -237,6 +239,7 @@ def load_products(conn, pallet_id):
         r["Ilość"] = int(r["Ilość"] or 1)
         r["Cena sprzedaży"] = float(r.get("Cena sprzedaży") or 0)
         r["Status sprzedaży"] = str(r.get("Status sprzedaży") or "Na stanie")
+        r["Platforma wystawienia"] = str(r.get("Platforma wystawienia") or "")
         for k in ["Długość paczki","Szerokość paczki","Wysokość paczki","Waga paczki"]:
             r[k] = float(r.get(k) or 0)
         r["Lp."] = int(r["Lp."])
@@ -254,7 +257,7 @@ def load_product_by_id(conn, product_id):
            real_sale_price AS "Realna cena sprzedaży", listing_price AS "Cena wystawienia",
            price_source AS "Źródło ceny", offer_link AS "Link do oferty", notes AS "Uwagi",
            priority AS "Priorytet", image_thumb AS "Miniatura",
-           sale_status AS "Status sprzedaży", sold_price AS "Cena sprzedaży",
+           sale_status AS "Status sprzedaży", listing_platform AS "Platforma wystawienia", sold_price AS "Cena sprzedaży",
            listed_at AS "Data wystawienia", sold_at AS "Data sprzedaży",
            created_at AS "Data dodania",
            package_l AS "Długość paczki", package_w AS "Szerokość paczki",
@@ -273,6 +276,7 @@ def load_product_by_id(conn, product_id):
     r["Ilość"] = int(r.get("Ilość") or 1)
     r["Cena sprzedaży"] = float(r.get("Cena sprzedaży") or 0)
     r["Status sprzedaży"] = str(r.get("Status sprzedaży") or "Na stanie")
+    r["Platforma wystawienia"] = str(r.get("Platforma wystawienia") or "")
     for k in ["Długość paczki", "Szerokość paczki", "Wysokość paczki", "Waga paczki"]:
         r[k] = float(r.get(k) or 0)
     r["_db_id"] = int(r.pop("id"))
@@ -342,7 +346,7 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         "real_sale_price": data["realna_cena_sprzedazy"], "listing_price": data["cena_wystawienia"],
         "price_source": data["zrodlo_ceny"], "offer_link": data["link_do_oferty"],
         "notes": data["uwagi"] + f" | Pewność identyfikacji: {data['pewnosc_ident']}", "priority": priority_from_price(data["realna_cena_sprzedazy"]),
-        "image_thumb": image_thumb or "", "sale_status": "Na stanie",
+        "image_thumb": image_thumb or "", "sale_status": "Na stanie", "listing_platform": "",
         "package_l": data.get("package_l", 0), "package_w": data.get("package_w", 0),
         "package_h": data.get("package_h", 0), "package_weight": data.get("package_weight", 0)
     }
@@ -354,9 +358,9 @@ def save_product(conn, pallet_id, data, quantity=1, image_thumb=""):
         row["position"] = int(max_position)
         result = s.execute(text("""
             INSERT INTO products (pallet_id, position, quantity, category, brand, product, model, state, completeness,
-                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority, image_thumb, sale_status, package_l, package_w, package_h, package_weight)
+                new_price, used_price, real_sale_price, listing_price, price_source, offer_link, notes, priority, image_thumb, sale_status, listing_platform, package_l, package_w, package_h, package_weight)
             VALUES (:pallet_id,:position,:quantity,:category,:brand,:product,:model,:state,:completeness,
-                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,:notes,:priority,:image_thumb,:sale_status,:package_l,:package_w,:package_h,:package_weight)
+                :new_price,:used_price,:real_sale_price,:listing_price,:price_source,:offer_link,:notes,:priority,:image_thumb,:sale_status,:listing_platform,:package_l,:package_w,:package_h,:package_weight)
             RETURNING id
         """), {"pallet_id":int(pallet_id), **row})
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=:id"), {"id":int(pallet_id)})
@@ -399,18 +403,27 @@ def update_product_thumbnail(conn, product_id, image_thumb, replace=False):
     invalidate_data_cache()
 
 
-def update_sale_status(conn, product_id, status, sold_price=0):
-    """Zmienia status sprzedaży produktu i zapisuje cenę sprzedaży."""
+def update_sale_status(conn, product_id, status, sold_price=0, listing_platform=""):
+    """Zmienia status sprzedaży produktu, platformę wystawienia i cenę sprzedaży."""
     allowed = {"Na stanie", "Wystawiony", "Sprzedany"}
+    platforms = {"Allegro", "OLX"}
     status = status if status in allowed else "Na stanie"
+    listing_platform = listing_platform if listing_platform in platforms else ""
+    if status != "Wystawiony":
+        listing_platform = ""
     with conn.session as s:
-        params = {"id": int(product_id), "status": status, "sold_price": float(sold_price or 0)}
+        params = {
+            "id": int(product_id),
+            "status": status,
+            "sold_price": float(sold_price or 0),
+            "listing_platform": listing_platform,
+        }
         if status == "Wystawiony":
-            sql = """UPDATE products SET sale_status=:status, sold_price=0, listed_at=COALESCE(listed_at, NOW()), sold_at=NULL, updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, listing_platform=:listing_platform, sold_price=0, listed_at=COALESCE(listed_at, NOW()), sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         elif status == "Sprzedany":
-            sql = """UPDATE products SET sale_status=:status, sold_price=:sold_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, listing_platform='', sold_price=:sold_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
         else:
-            sql = """UPDATE products SET sale_status=:status, sold_price=0, sold_at=NULL, updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, listing_platform='', sold_price=0, sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         s.execute(text(sql), params)
         s.execute(text("UPDATE pallets SET updated_at=NOW() WHERE id=(SELECT pallet_id FROM products WHERE id=:id)"), {"id": int(product_id)})
         s.commit()
@@ -773,7 +786,7 @@ else:
 
     st.divider(); st.subheader("📋 Zawartość palety")
 
-    sort_col, filter_col = st.columns([2.2, 1.0])
+    sort_col, listed_filter_col, sold_filter_col = st.columns([2.0, 1.0, 1.0])
     with sort_col:
         sort_choice_mobile = st.selectbox(
             "Sortowanie",
@@ -787,20 +800,28 @@ else:
             ],
             key="sort_choice_mobile",
         )
-    with filter_col:
+    with listed_filter_col:
         hide_listed = st.checkbox(
             "🙈 Ukryj wystawione",
             value=False,
             key="hide_listed_products",
             help="Nie pokazuj produktów ze statusem „Wystawiony” w podglądzie produktów.",
         )
+    with sold_filter_col:
+        hide_sold = st.checkbox(
+            "🙈 Ukryj sprzedane",
+            value=False,
+            key="hide_sold_products",
+            help="Nie pokazuj produktów ze statusem „Sprzedany” w podglądzie produktów.",
+        )
 
     # Filtrujemy przed sortowaniem i paginacją, dzięki czemu liczba stron
     # oraz zakres „Wyświetlam X–Y z Z” dotyczą tylko widocznych produktów.
-    if hide_listed:
+    if hide_listed or hide_sold:
         products = [
             r for r in products
-            if str(r.get("Status sprzedaży") or "Na stanie") != "Wystawiony"
+            if not (hide_listed and str(r.get("Status sprzedaży") or "Na stanie") == "Wystawiony")
+            and not (hide_sold and str(r.get("Status sprzedaży") or "Na stanie") == "Sprzedany")
         ]
 
     def _product_name_for_sort(r):
@@ -925,7 +946,9 @@ else:
             )
             thumb = str(r.get("Miniatura") or "")
             status = str(r.get("Status sprzedaży") or "Na stanie")
+            platform = str(r.get("Platforma wystawienia") or "")
             status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
+            status_label = f"Wystawiony · {platform}" if status == "Wystawiony" and platform else status
 
             with st.container(border=True):
                 if thumb:
@@ -945,7 +968,7 @@ else:
                 st.markdown(f'<span class="level-badge {cls}">{level}</span>', unsafe_allow_html=True)
                 st.markdown(f'<div class="compact-price">{float(r["Realna cena sprzedaży"]):.0f} zł</div>', unsafe_allow_html=True)
                 st.markdown(
-                    f'<div class="compact-meta">Ilość: <b>{int(r["Ilość"])}</b> · {status_icon} {escape(status)}</div>',
+                    f'<div class="compact-meta">Ilość: <b>{int(r["Ilość"])}</b> · {status_icon} {escape(status_label)}</div>',
                     unsafe_allow_html=True
                 )
                 # Każda karta dostaje identyczne miejsce na informację o sprzedaży.
@@ -1004,6 +1027,12 @@ else:
                             index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
                             key=f"manual_sale_status_{product_id}"
                         )
+                        manual_platform = st.selectbox(
+                            "Gdzie wystawiono?", ["Allegro", "OLX"],
+                            index=["Allegro", "OLX"].index(str(r.get("Platforma wystawienia") or "Allegro")) if str(r.get("Platforma wystawienia") or "Allegro") in ["Allegro", "OLX"] else 0,
+                            key=f"manual_listing_platform_{product_id}",
+                            disabled=manual_status != "Wystawiony",
+                        )
                         manual_sold_price = (
                             st.number_input("Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży", 0) or 0), step=5.0, key=f"manual_sold_price_{product_id}")
                             if manual_status == "Sprzedany" else 0.0
@@ -1012,7 +1041,7 @@ else:
 
                     if save_clicked:
                         update_product(conn, product_id, new_qty, new_real, new_listing, None, new_offer, new_product_name, pkg_l, pkg_w, pkg_h, pkg_weight)
-                        update_sale_status(conn, product_id, manual_status, manual_sold_price)
+                        update_sale_status(conn, product_id, manual_status, manual_sold_price, manual_platform)
                         st.success("✅ Zapisano zmiany.")
                         st.rerun(scope="fragment")
 
