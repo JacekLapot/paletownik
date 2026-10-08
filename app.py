@@ -773,18 +773,35 @@ else:
 
     st.divider(); st.subheader("📋 Zawartość palety")
 
-    sort_choice_mobile = st.selectbox(
-        "Sortowanie",
-        [
-            "Data dodania — najnowsze",
-            "Data dodania — najstarsze",
-            "Nazwa A–Z",
-            "Nazwa Z–A",
-            "Wartość — od najwyższej",
-            "Wartość — od najniższej",
-        ],
-        key="sort_choice_mobile",
-    )
+    sort_col, filter_col = st.columns([2.2, 1.0])
+    with sort_col:
+        sort_choice_mobile = st.selectbox(
+            "Sortowanie",
+            [
+                "Data dodania — najnowsze",
+                "Data dodania — najstarsze",
+                "Nazwa A–Z",
+                "Nazwa Z–A",
+                "Wartość — od najwyższej",
+                "Wartość — od najniższej",
+            ],
+            key="sort_choice_mobile",
+        )
+    with filter_col:
+        hide_listed = st.checkbox(
+            "🙈 Ukryj wystawione",
+            value=False,
+            key="hide_listed_products",
+            help="Nie pokazuj produktów ze statusem „Wystawiony” w podglądzie produktów.",
+        )
+
+    # Filtrujemy przed sortowaniem i paginacją, dzięki czemu liczba stron
+    # oraz zakres „Wyświetlam X–Y z Z” dotyczą tylko widocznych produktów.
+    if hide_listed:
+        products = [
+            r for r in products
+            if str(r.get("Status sprzedaży") or "Na stanie") != "Wystawiony"
+        ]
 
     def _product_name_for_sort(r):
         return " ".join(
