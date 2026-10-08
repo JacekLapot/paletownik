@@ -1078,7 +1078,7 @@ else:
             page_selected = st.number_input("Strona", min_value=1, max_value=total_pages, value=current_page, step=1, key="products_page_input")
             if int(page_selected) != current_page:
                 st.session_state.products_page = int(page_selected)
-                st.rerun()
+                st.rerun(scope="app")
         with pc3:
             start_idx = (current_page - 1) * page_size
             end_idx = min(start_idx + page_size, total_products)
@@ -1093,18 +1093,18 @@ else:
         nav1, nav2, nav3, nav4, nav5 = st.columns([1, 1, 2, 1, 1])
         with nav1:
             if st.button("⏮️", disabled=current_page <= 1, key="page_first", use_container_width=True):
-                st.session_state.products_page = 1; st.rerun()
+                st.session_state.products_page = 1; st.rerun(scope="app")
         with nav2:
             if st.button("◀️", disabled=current_page <= 1, key="page_prev", use_container_width=True):
-                st.session_state.products_page = current_page - 1; st.rerun()
+                st.session_state.products_page = current_page - 1; st.rerun(scope="app")
         with nav3:
             st.markdown(f"<div style='text-align:center;padding:8px;font-weight:700;'>Strona {current_page} z {total_pages}</div>", unsafe_allow_html=True)
         with nav4:
             if st.button("▶️", disabled=current_page >= total_pages, key="page_next", use_container_width=True):
-                st.session_state.products_page = current_page + 1; st.rerun()
+                st.session_state.products_page = current_page + 1; st.rerun(scope="app")
         with nav5:
             if st.button("⏭️", disabled=current_page >= total_pages, key="page_last", use_container_width=True):
-                st.session_state.products_page = total_pages; st.rerun()
+                st.session_state.products_page = total_pages; st.rerun(scope="app")
 
         st.caption("Poziom jest liczony automatycznie z realnej ceny sprzedaży za sztukę: 🟡 Priorytet ≥250 zł • 🟢 Ważne 150–249,99 zł • 🟠 Mogą poczekać 50–149,99 zł • 🔴 Badziew <50 zł.")
 
