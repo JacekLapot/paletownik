@@ -410,10 +410,10 @@ def update_product_thumbnail(conn, product_id, image_thumb, replace=False):
 def update_sale_status(conn, product_id, status, sold_price=0, listing_platform=""):
     """Zmienia status sprzedaży produktu, platformę wystawienia i cenę sprzedaży."""
     allowed = {"Na stanie", "Wystawiony", "Sprzedany"}
-    platforms = {"Allegro", "OLX"}
+    platforms = {"Allegro", "OLX", "Vinted"}
     status = status if status in allowed else "Na stanie"
     listing_platform = listing_platform if listing_platform in platforms else ""
-    if status != "Wystawiony":
+    if status == "Na stanie":
         listing_platform = ""
     with conn.session as s:
         params = {
@@ -425,7 +425,7 @@ def update_sale_status(conn, product_id, status, sold_price=0, listing_platform=
         if status == "Wystawiony":
             sql = """UPDATE products SET sale_status=:status, listing_platform=:listing_platform, sold_price=0, listed_at=COALESCE(listed_at, NOW()), sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         elif status == "Sprzedany":
-            sql = """UPDATE products SET sale_status=:status, listing_platform='', sold_price=:sold_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
+            sql = """UPDATE products SET sale_status=:status, listing_platform=:listing_platform, sold_price=:sold_price, sold_at=NOW(), updated_at=NOW() WHERE id=:id"""
         else:
             sql = """UPDATE products SET sale_status=:status, listing_platform='', sold_price=0, sold_at=NULL, updated_at=NOW() WHERE id=:id"""
         s.execute(text(sql), params)
@@ -952,7 +952,7 @@ else:
             status = str(r.get("Status sprzedaży") or "Na stanie")
             platform = str(r.get("Platforma wystawienia") or "")
             status_icon = {"Na stanie":"⚪", "Wystawiony":"🟢", "Sprzedany":"🔴"}.get(status, "⚪")
-            status_label = f"Wystawiony · {platform}" if status == "Wystawiony" and platform else status
+            status_label = f"{status} · {platform}" if status in {"Wystawiony", "Sprzedany"} and platform else status
 
             with st.container(border=True):
                 if thumb:
@@ -1031,11 +1031,13 @@ else:
                             index=["Na stanie", "Wystawiony", "Sprzedany"].index(current_status) if current_status in ["Na stanie", "Wystawiony", "Sprzedany"] else 0,
                             key=f"manual_sale_status_{product_id}"
                         )
+                        platform_options = ["Allegro", "OLX", "Vinted"]
+                        current_platform = str(r.get("Platforma wystawienia") or "Allegro")
                         manual_platform = st.selectbox(
-                            "Gdzie wystawiono?", ["Allegro", "OLX"],
-                            index=["Allegro", "OLX"].index(str(r.get("Platforma wystawienia") or "Allegro")) if str(r.get("Platforma wystawienia") or "Allegro") in ["Allegro", "OLX"] else 0,
+                            "Gdzie wystawiono / sprzedano?", platform_options,
+                            index=platform_options.index(current_platform) if current_platform in platform_options else 0,
                             key=f"manual_listing_platform_{product_id}",
-                            disabled=manual_status != "Wystawiony",
+                            disabled=manual_status == "Na stanie",
                         )
                         manual_sold_price = (
                             st.number_input("Za ile sprzedano?", min_value=0.0, value=float(r.get("Cena sprzedaży", 0) or 0), step=5.0, key=f"manual_sold_price_{product_id}")
